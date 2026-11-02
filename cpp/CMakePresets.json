@@ -1,0 +1,37 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "native-debug",
+      "binaryDir": "${sourceDir}/../build/native-debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "native-release",
+      "binaryDir": "${sourceDir}/../build/native-release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "wasm-st",
+      "binaryDir": "${sourceDir}/../build/wasm-st",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "ANTSIM_THREADS": "OFF" }
+    },
+    {
+      "name": "wasm-mt",
+      "binaryDir": "${sourceDir}/../build/wasm-mt",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "ANTSIM_THREADS": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "native-debug", "configurePreset": "native-debug" },
+    { "name": "native-release", "configurePreset": "native-release" },
+    { "name": "wasm-st", "configurePreset": "wasm-st" },
+    { "name": "wasm-mt", "configurePreset": "wasm-mt" }
+  ],
+  "testPresets": [
+    { "name": "native-debug", "configurePreset": "native-debug", "output": { "outputOnFailure": true } },
+    { "name": "native-release", "configurePreset": "native-release", "output": { "outputOnFailure": true } }
+  ]
+}

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+dist-pages/
+build/
+test-results/
+playwright-report/
+app/public/wasm/
+*.log
+.DS_Store
+validation/report/out/
+validation/cases/*/work/
+__pycache__/
+app/public/vendor/
+validation/cases/*/out/antsim*.json
+validation/cases/*/out/problem_*.json

@@ -1,0 +1,10 @@
+# Netlify / Cloudflare Pages: cross-origin isolation enables SharedArrayBuffer,
+# which the multi-threaded solver needs. Without these headers the app still
+# works with the single-thread solver.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: same-origin
+
+/wasm/*
+  Cache-Control: public, max-age=3600
