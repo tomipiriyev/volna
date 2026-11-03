@@ -28,6 +28,8 @@ export interface GpuLayout {
   materials: number;
   pmc: boolean[];
   cells: number;
+  /** Faces cut by conductors in conformal mode (arrays cutIdx, cutCoef). */
+  cutFaces: number;
   cpml: { axis: number; lo: number; hi: number; nE: number; nH: number; planeE: number; profE: number; profH: number; psiE: number; psiH: number }[];
   port: { axis: number; edges: { at: number; length: number; source: number; line: number }[]; lines: { ijk: [number, number, number]; area: number; weight: number }[] } | null;
   nf2ff: { freqs: number[]; faces: { a: number; side: number; plane: number; B0: number; B1: number; C0: number; C1: number; nb: number; nc: number; offEp: number; offHq: number; offEq: number; offHp: number }[] } | null;
@@ -36,7 +38,7 @@ export interface GpuLayout {
 /** Arrays exported by the solver, by name (see Solver::gpuFloats / gpuUints). */
 export type GpuArrays = Record<string, Float32Array | Uint32Array>;
 
-export const GPU_ARRAY_NAMES = ['mx', 'my', 'mz', 'ca', 'cb', 'epsR', 'invD0', 'invD1', 'invD2', 'invDd0', 'invDd1', 'invDd2', 'd0', 'd1', 'd2', 'dd0', 'dd1', 'dd2', 'cpmlProfE', 'cpmlProfH', 'waveform'];
+export const GPU_ARRAY_NAMES = ['mx', 'my', 'mz', 'ca', 'cb', 'epsR', 'invD0', 'invD1', 'invD2', 'invDd0', 'invDd1', 'invDd2', 'd0', 'd1', 'd2', 'dd0', 'dd1', 'dd2', 'cpmlProfE', 'cpmlProfH', 'waveform', 'cutIdx', 'cutCoef'];
 
 export interface GpuProgress {
   step: number;
@@ -99,7 +101,7 @@ export async function requestFdtdDevice(layout: GpuLayout): Promise<{ device: GP
 /** Bytes of the largest buffer the run allocates (fields, PML state, NF2FF sums or constants). */
 export function largestBuffer(l: GpuLayout): number {
   const psi = 2 * l.cpml.reduce((s, x) => s + (x.nE + x.nH) * x.planeE, 0);
-  const consts = 3 * l.materials + 4 * (l.nx + l.ny + l.nz + 3) + l.maxSteps + 2 * l.cpml.reduce((s, x) => s + x.nE + x.nH, 0);
+  const consts = 3 * l.materials + 4 * (l.nx + l.ny + l.nz + 3) + l.maxSteps + 2 * l.cpml.reduce((s, x) => s + x.nE + x.nH, 0) + 5 * l.cutFaces;
   return 4 * Math.max(6 * l.nodes, 6 * accLength(l), psi, consts, 2 * l.maxSteps + N_PART + 4 * (l.nf2ff?.freqs.length ?? 0));
 }
 
@@ -149,6 +151,7 @@ export class GpuFdtd {
       ['edgeSrc', L.port?.edges.map((e) => e.source) ?? []],
       ['lineArea', L.port?.lines.map((l) => l.area) ?? []],
       ['lineW', L.port?.lines.map((l) => l.weight) ?? []],
+      ['cut', arrays.cutCoef],
     ];
     const off: Record<string, number> = {};
     let n = 0;
@@ -181,6 +184,8 @@ export class GpuFdtd {
     const mPhase = meta.length;
     // Phase increment per half step, as a u32 fraction of a turn: f dt / 2 * 2^32.
     for (const f of L.nf2ff?.freqs ?? []) meta.push(Math.round(((f * L.dt) / 2) * 2 ** 32) >>> 0);
+    const mCut = meta.length;
+    for (const v of arrays.cutIdx) meta.push(v);
     if (meta.some((v) => !Number.isInteger(v) || v < 0 || v > 0xffffffff)) throw new GpuError('GPU_ERROR', 'index tables exceed 32 bits');
 
     const totE = L.cpml.reduce((s, x) => s + x.nE * x.planeE, 0);
@@ -190,7 +195,7 @@ export class GpuFdtd {
     this.ioPart = 2 * L.maxSteps;
     const W = Math.ceil(L.nodes / 2);
 
-    const P = new ArrayBuffer(192);
+    const P = new ArrayBuffer(208);
     const u = new Uint32Array(P), fl = new Float32Array(P);
     const nf = L.nf2ff?.freqs.length ?? 0;
     u.set([L.nx, L.ny, L.nz, L.sx, L.sy, L.nodes, W, nMat], 0);
@@ -203,6 +208,7 @@ export class GpuFdtd {
     fl[45] = L.dt;
     fl[46] = L.pulseEnd;
     fl[47] = L.energyEndDb;
+    u.set([L.cutFaces, mCut, off.cut], 48);
 
     const dev = device;
     const make = (size: number, usage: number, data?: ArrayBufferView) => {
@@ -233,7 +239,7 @@ export class GpuFdtd {
       IO: make((2 * L.maxSteps + N_PART + 4 * nf) * 4, S),
       ACC: make(6 * this.accL * 4, S),
       META: make(meta.length * 4, S, new Uint32Array(meta)),
-      P: make(192, BUF.UNIFORM, new Uint8Array(P)),
+      P: make(208, BUF.UNIFORM, new Uint8Array(P)),
       D: make(dData.byteLength, BUF.UNIFORM, dData),
     };
 
@@ -250,7 +256,7 @@ export class GpuFdtd {
     const module = device.createShaderModule({ code: shaderSource, label: 'fdtd' });
     const pl = device.createPipelineLayout({ bindGroupLayouts: [bgl0, bgl1] });
     this.pipes = {};
-    for (const entryPoint of ['updateH', 'updateE', 'cpmlE', 'cpmlH', 'portCurrent', 'portVoltage', 'twiddle', 'nf2ff', 'fold', 'energy', 'energyCheck', 'advance'])
+    for (const entryPoint of ['updateH', 'updateE', 'cpmlE', 'cpmlH', 'portCurrent', 'portVoltage', 'twiddle', 'nf2ff', 'fold', 'energy', 'energyCheck', 'advance', 'cutFaces'])
       this.pipes[entryPoint] = device.createComputePipeline({ layout: pl, compute: { module, entryPoint }, label: entryPoint });
     this.lostPromise = device.lost.then((info) => {
       this.lost ??= info.message || info.reason || 'device lost';
@@ -296,6 +302,10 @@ export class GpuFdtd {
     for (let c = 0; c < count; c++) {
       pass.setPipeline(p.updateH);
       pass.dispatchWorkgroups(gx, L.ny + 1, L.nx + 1);
+      if (L.cutFaces) {
+        pass.setPipeline(p.cutFaces);
+        pass.dispatchWorkgroups(Math.ceil(L.cutFaces / 64));
+      }
       pass.setPipeline(p.cpmlH);
       L.cpml.forEach((s, i) => {
         if (!s.nH) return;

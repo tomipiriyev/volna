@@ -8,7 +8,8 @@ in the browser; there is no server.
 
 **Use it online: <https://tomipiriyev.github.io/volna/>** (Chrome or Edge recommended).
 
-> **Status: M5 (all planned milestones).** These work and are tested:
+> **Status: M5 (all planned milestones), plus conductor loss and conformal
+> conductors.** These work and are tested:
 > - STEP import, viewport, roles, feed tool, diagnostics and project files (M1a)
 > - a C++ FDTD solver with CPML, PMC/PEC boundaries, a lumped port and a
 >   near-to-far-field transform, natively and as wasm in a worker with

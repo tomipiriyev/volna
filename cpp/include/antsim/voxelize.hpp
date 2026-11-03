@@ -33,6 +33,9 @@ public:
     /// Union of the intervals of four rays offset by +-eps on both transverse axes:
     /// a line lying on the surface counts as inside (inclusive rule).
     void inclusiveIntervals(double u, double v, double eps, std::vector<Interval>& out) const;
+    /// Outward unit normal of the surface where the ray at (u, v) crosses nearest to `t`
+    /// along the axis; false if the ray hits nothing.
+    bool normalAt(double u, double v, double t, double n[3]) const;
     int axis() const { return a_; }
 
 private:

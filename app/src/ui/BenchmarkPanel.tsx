@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import dipoleProblem from '../../../validation/cases/dipole/problem.json?raw';
 import patchProblem from '../../../validation/cases/patch_step/problem.json?raw';
+import roundProblem from '../../../validation/cases/dipole_round_h2.5/problem.json?raw';
 import dipoleExpected from '../../../validation/cases/dipole/expected.json';
 import type { Capabilities } from '../platform/capabilities';
 import { estimateMemory, formatBytes, type ProblemJson } from '../sim/memoryEstimate';
@@ -76,7 +77,7 @@ export function BenchmarkPanel({ caps }: { caps: Capabilities | null }) {
     try {
       client = await SolverClient.create(caps.threads, caps.threadsReason);
       const out: { name: string; r: GpuSelfTestResult }[] = [];
-      for (const [name, problem] of [['λ/2 dipole', dipoleProblem], ['STEP patch (dielectric)', patchProblem]] as const) {
+      for (const [name, problem] of [['λ/2 dipole', dipoleProblem], ['STEP patch (dielectric)', patchProblem], ['round metal dipole (conformal)', roundProblem]] as const) {
         out.push({ name, r: await client.gpuSelfTest(problem, 1000) });
         setGpuTest([...out]);
       }
@@ -97,7 +98,7 @@ export function BenchmarkPanel({ caps }: { caps: Capabilities | null }) {
     try {
       client = await SolverClient.create(caps.threads, caps.threadsReason);
       const out: { name: string; r: GpuCompareResult }[] = [];
-      for (const [name, problem] of [['λ/2 dipole', dipoleProblem], ['STEP patch (dielectric)', patchProblem]] as const) {
+      for (const [name, problem] of [['λ/2 dipole', dipoleProblem], ['STEP patch (dielectric)', patchProblem], ['round metal dipole (conformal)', roundProblem]] as const) {
         setCompareState(`Running ${name} on the CPU, then on WebGPU…`);
         out.push({ name, r: await client.gpuCompare(problem) });
         setCompare([...out]);
@@ -241,7 +242,7 @@ export function BenchmarkPanel({ caps }: { caps: Capabilities | null }) {
         <button type="button" onClick={runCompare} disabled={!caps || !gpuOk || !!compareState} data-testid="run-gpu-compare">
           {compareState ? 'Comparing…' : 'GPU vs CPU, complete runs'}
         </button>
-        <span className="muted small">{compareState ?? 'Both problems to termination on each backend; compares Z_in over the band and D (a few minutes).'}</span>
+        <span className="muted small">{compareState ?? 'All problems to termination on each backend; compares Z_in over the band and D (a few minutes).'}</span>
       </div>
       {compare.length > 0 && (
         <table className="kv small" data-testid="gpu-compare">

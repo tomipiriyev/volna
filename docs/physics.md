@@ -58,6 +58,83 @@ what the code does, including its approximations. The code lives in
   - Details and overlap rules: [problem-format.md](problem-format.md).
 - **Magnetic materials.** Not implemented; μ = μ₀ everywhere.
 
+## Conformal conductors
+
+With `"conformal": true` (the app turns it on when a conductor has curved or
+oblique faces), conductors that do not sit on grid lines keep their true shape
+inside the cells they cut, instead of becoming staircases. This is the
+Dey-Mittra scheme.
+
+- **Edges.** An edge partly inside a conductor stays active, and records its open
+  length l. Stretches under 0.1% of an edge are rounded away, so CAD coordinates
+  on a grid line create no slivers. Geometry entirely on grid lines has no partly
+  covered edges and runs bitwise identically to the standard update.
+- **Faces.** The H update of a face touching such an edge uses the open lengths
+  and the open area A: μA dH/dt = −Σ±l_i E_i. A comes from the polygon of open
+  edge stretches, joined by chords where the surface crosses the face. E updates
+  are unchanged. The bulk kernels are untouched: a sparse pass after them corrects
+  only the cut faces, as H ← c₀H + Σc_i E_i, on the CPU and the GPU alike.
+- **Stability.** Small cut faces would need a much shorter time step. Instead the
+  Courant number becomes 0.8 when anything is cut (24% more steps than 0.99),
+  and faces with dt²c²Σ(l_i/(A·dual_i)) above 3 have their coefficients capped.
+  The largest eigenvalue of the whole update is then measured by power iteration
+  from the cut faces' edges, and the cap tightens if it exceeds 3.98 (leapfrog
+  needs it below 4), so the time step never has to depend on the smallest cut.
+- **Metal loss on the true surface.** On a metal's chord the tangential E is
+  E_s = R_s H_b, with H_b the surface's tangential H across the chord. The face's
+  H is H_b·κ, where κ = √(1 − (n·f)²) from the surface normal n and the face
+  normal f (floored at 0.2), so μA dH/dt gains −l_c R_s H/κ, a semi-implicit
+  damping of H. Each family of parallel faces tiles the same surface, and the
+  three components add to |H|², which makes the dissipated power R_s|H_t|²dS
+  exact for any surface orientation. No round-wire calibration is needed. Where a
+  grid line is tangent to a round body the surface runs along a fully covered
+  edge, and that edge's faces carry the loss, with the chord along the edge.
+
+Accuracy, from `cpp/tests/test_conformal.cpp` (exact answers, Courant 0.8):
+
+| Case | Staircase | Conformal |
+|---|---|---|
+| Circular cavity TM010, f error, a/h = 10, 20, 40 | −3.76, −1.92, −0.95 % | −0.13, −0.06, −0.02 % |
+| Rectangular cavity TM110 rotated 10–73°, f error, 1 mm cells (24 × 16 mm) | −3.6 to −5.0 % | −0.16 to −0.21 % |
+| Spherical cavity, f error, a/h = 12, 24 | −4.38, −2.18 % | −0.09, −0.03 % |
+| Wall between grid lines (any position), f error | snaps to a line, up to 1.7 % | −0.035 % (grid dispersion) |
+| Circular cavity metal walls, Q (exact 199.66) | 160.3 | 197.7 |
+| Rotated cavity metal walls at 0, 30, 45°, Q (exact 102.94) | not run | 102.79, 102.32, 102.75 |
+| Coaxial rod 4 and 8 cells across, Q (exact 53.96) | not run | off the grid 53.93, 53.89; tangent lines 52.83, 54.48 |
+
+The frequency error falls about 2.3–2.8× per halving of the cell, an observed
+order of about 1.3: better than the staircase's first order, but not second order,
+because capped faces keep a small first-order term. Three rotated cavities ran
+200,000 steps with no growth. After 1000 steps the GPU fields of a conformal metal
+dipole match the CPU to 6e-7 (relative L2).
+
+The total energy used for termination counts cut H faces at their full volume, so
+in a closed cavity it swings by some percent over a period. That only affects the
+stopping test, which compares it over tens of dB.
+
+**What this means for antennas.** A dipole with 40 × 40 × 5 mm metal top-hats,
+rotated 45° about its feed axis, against its axis-aligned twin on the same grid
+lines (f_res, one-off run at 0.625 mm, the rest in the validation report):
+
+| Cell | Axis-aligned twin | Rotated, conformal (gap to twin) | Rotated, staircase (gap to twin) |
+|---|---|---|---|
+| 2.5 mm | 0.6177 GHz | 0.6213 GHz (+0.59%) | 0.6282 GHz (+1.70%) |
+| 1.25 mm | 0.6149 GHz | 0.6167 GHz (+0.29%) | 0.6095 GHz (−0.87%) |
+| 0.625 mm | 0.6125 GHz | 0.6130 GHz (+0.08%) | 0.6145 GHz (+0.33%) |
+
+Conformal results converge smoothly to the twin's and hardly depend on the angle,
+while staircase results jump and change sign, so refining does not reliably help
+and one mesh cannot be trusted. All three columns are still about 0.5–3% above the
+extrapolated answer (about 0.610 GHz) at these grids: that remaining error comes
+from the feed gap and the plate edges, which conformal faces do not address, and
+the twin has it too. On a slender round dipole, whose resonance follows its length
+and feed gap rather than its surface shape, conformal faces change f_res little
+(staircase +0.68%, conformal +0.82% at 2.5 mm against the finest conformal run).
+There the gain is the surface loss, not the resonance.
+
+Not conformal: dielectrics (still whole cells), zero-thickness sheets (outlines
+staircased to whole edges) and thin-wire lines.
+
 ## Conductor loss (metals)
 
 A conductor is PEC or a **metal** with conductivity σ. Metal objects are
@@ -89,7 +166,7 @@ conductor's surface instead carries the skin-effect surface resistance.
     R' = Re[γ I₀(γa)/(2πaσ I₁(γa))], from R_s/(2πa) (a ≫ δ) to 1/(πa²σ)
     (a ≪ δ), with the wire's CAD radius (or the radius of a circle with its
     perimeter): σ_e = 1/(R'A).
-- **Round wires.** A straight round wire voxelized as a solid (cylinder
+- **Round wires, without conformal faces.** A straight round wire voxelized as a solid (cylinder
   primitives at least two diameters long; meshes the app recognises as round
   wires) becomes a staircase whose convex corners and one-cell fins
   concentrate the current. The rule above would then overstate its loss by

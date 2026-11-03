@@ -91,6 +91,10 @@ export function MeshPanel() {
           <NumberField label="PML cells" value={m.pmlCells} min={4} max={20} step={1} onChange={(pmlCells) => sim.setMeshSettings({ pmlCells })} />
           <NumberField label="Cell limit (millions)" value={m.maxCells / 1e6} min={0.1} max={100} step={0.5} onChange={(v) => sim.setMeshSettings({ maxCells: Math.round(v * 1e6) })} />
         </div>
+        <label className="check" title="Curved or oblique conductors use their true open lengths and areas in the cells they cut, instead of staircases. Takes about 24 % more time steps.">
+          <input type="checkbox" checked={m.conformal} onChange={(e) => sim.setMeshSettings({ conformal: e.target.checked })} data-testid="mesh-conformal" />
+          Conformal conductors
+        </label>
         <p className="small muted">
           Background cell λ/{freq.cellsPerWavelength} at f max (set on the Frequency step), finer in dielectrics (λ/√εr), across thin
           slabs ({m.minSlabCells}+ cells), at the feed ({m.feedGapCells}+ cells across the gap) and on conductor faces. Neighbouring
@@ -126,7 +130,7 @@ export function MeshPanel() {
               </tr>
               <tr>
                 <td>Time step</td>
-                <td>{(timeStep(mesh.lines) * 1e12).toFixed(3)} ps (Courant 0.99)</td>
+                <td>{(timeStep(mesh.lines) * 1e12).toFixed(3)} ps (Courant 0.99; 0.8 if conductors cut grid cells)</td>
               </tr>
               {memory && (
                 <tr>
@@ -184,7 +188,7 @@ export function ValidatePanel({ caps }: { caps: Capabilities | null }) {
   const diags = current && v ? [...v.plan.diagnostics, ...v.info.report.diagnostics] : [];
   const errors = diags.filter((d) => d.severity === 'error').length;
   const warnings = diags.filter((d) => d.severity === 'warning').length;
-  const time = current && v ? estimateRunTime(v.plan.mesh.lines, freq.fMin, freq.fMax, sim.settings.maxSteps, v.nsPerCellStep) : null;
+  const time = current && v ? estimateRunTime(v.plan.mesh.lines, freq.fMin, freq.fMax, sim.settings.maxSteps, v.nsPerCellStep, v.info.report.conformal ? 0.8 : 0.99) : null;
 
   return (
     <>
@@ -235,6 +239,14 @@ export function ValidatePanel({ caps }: { caps: Capabilities | null }) {
                   </td>
                 </tr>
               ))}
+              {v.info.report.conformal && (
+                <tr>
+                  <td>Conformal conductors</td>
+                  <td data-testid="conformal-report">
+                    {v.info.report.conformal.cutFaces.toLocaleString()} cut faces, {v.info.report.conformal.cappedFaces.toLocaleString()} small ones capped for stability
+                  </td>
+                </tr>
+              )}
               <tr>
                 <td>Signal–reference DC path</td>
                 <td>{v.info.report.dcConnected === null ? '—' : v.info.report.dcConnected ? 'connected (see warning)' : 'none'}</td>

@@ -35,6 +35,7 @@ outputs are committed as `out/reference.json`. Tolerances live in
 | vs openEMS | λ/2 wire dipole; λ/4 wire monopole on a 1λ PEC sheet ground | Z_in over the band < 3%, f_res < 1%, D < 0.1 dB, efficiency < 0.02 |
 | Dipole physics | wire dipole | L/λ at resonance 0.46–0.49; R(res) 60–75 Ω; D(0.95 GHz) = 2.15 ± 0.15 dBi; P_rad/P_acc = 1 ± 0.02; far field vs Poynting ± 0.01 |
 | Absorbing boundary | PML 16 cells; doubled clearance | Z_in change < 0.5%, D change < 0.05 dB |
+| Conformal conductors | top-hat dipole rotated 30° and 45° about its feed axis, against its axis-aligned twin on the same grid lines, 2.5 and 1.25 mm cells | f_res difference between angles < 0.4% and < 0.2%, at least 3× below staircase; gap to twin at 45° < 0.5% at 1.25 mm, shrinking at least 1.5× per halving; efficiency within 0.001. Limits set after measuring, as regression guards. A slender round dipole is reported with no limit. |
 | Mesh refinement | dipole with solid 5 × 5 mm square arms at feed cells 2.5, 1.25 and 0.833 mm | finest pair: f_res < 0.5%, D < 0.05 dB |
 | Angular resolution | quadrature 12×24 / 48×96 / 96×192 and display grids 5° / 2° / 1° | P_rad < 0.01 dB, D < 0.05 dB |
 | Termination | −50 vs −70 dB end criterion | reported (info) |

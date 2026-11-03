@@ -112,6 +112,7 @@ describe('problem builder: metal conductors', () => {
     // so the freshness of saved results, does not change).
     const pec = buildSimulation(snapshotFor(m, assign(false), port, freq), simBodies(m)).problem;
     expect('metalLossFrequency' in pec).toBe(false);
+    expect('conformal' in pec).toBe(false); // nothing here is off the grid lines
     for (const o of pec.objects as Record<string, unknown>[]) {
       if (o.type === 'mesh' && o.material !== 'openems-patch') expect(o.material).toBe('pec');
       expect('currentFaces' in o || 'thickness' in o || 'radius' in o).toBe(false);
@@ -186,7 +187,7 @@ describe.skipIf(!hasCli)('STEP pipeline vs programmatic geometry (native solver)
     expect(Math.abs(ff.efficiency - 1)).toBeLessThan(0.02);
   }, 300_000);
 
-  it('resistive-metal dipole: the round arms get the calibrated wire loss, like cylinder twins', async () => {
+  it('resistive-metal dipole: conformal mesh arms lose the same power as exact cylinder twins', async () => {
     const m = await loadFixture('dipole.step');
     const top = bodyByName(m, 'arm_top'), bottom = bodyByName(m, 'arm_bottom');
     const sigma = 1e4, f = 2.4e9; // poor conductor, so the loss stands well above the energy-balance error
@@ -199,13 +200,22 @@ describe.skipIf(!hasCli)('STEP pipeline vs programmatic geometry (native solver)
         simBodies(m),
       );
     const lossy = plan(true);
-    // The arms (4 cells across here) are recognised as round wires and passed with their radius.
-    for (const o of lossy.problem.objects as { wire?: { axis: number; radius: number } }[]) {
+    // Curved conductors turn conformal mode on, so the wire calibration hint is not needed.
+    expect(lossy.problem.conformal).toBe(true);
+    for (const o of lossy.problem.objects as { wire?: unknown }[]) expect(o.wire).toBeUndefined();
+    // Without conformal faces, the arms (4 cells across here) are passed as round wires instead.
+    const staircase = buildSimulation(
+      snapshotFor(m, { [top.id]: { role: 'radiator', priority: 0, conductor }, [bottom.id]: { role: 'radiator', priority: 0, conductor } }, port, freq),
+      simBodies(m),
+      { ...DEFAULT_MESH_SETTINGS, conformal: false },
+    );
+    expect('conformal' in staircase.problem).toBe(false);
+    for (const o of staircase.problem.objects as { wire?: { axis: number; radius: number } }[]) {
       expect(o.wire?.axis).toBe(2);
       expect(o.wire?.radius).toBeCloseTo(1, 2);
     }
-    // Twin: the same arms as exact cylinder primitives on the same grid (calibrated in the
-    // solver, checked against R' I^2 in the C++ tests).
+    // Twin: the same arms as exact cylinder primitives on the same grid (checked against
+    // exact Q values in the C++ tests).
     const twin = {
       ...lossy.problem,
       objects: [
@@ -213,8 +223,10 @@ describe.skipIf(!hasCli)('STEP pipeline vs programmatic geometry (native solver)
         { type: 'cylinder', name: 'arm_bottom', material: 'Resistive', axis: 2, center: [0, 0], radius: 1, range: [-29.5, -0.5] },
       ],
     };
-    const r = runCli(lossy.problem), rTwin = runCli(twin), rPec = runCli(plan(false).problem);
-    const loss = (x: { farField: { efficiency: number }[] }) => 1 - x.farField[0].efficiency / rPec.farField[0].efficiency;
+    const pecProblem = plan(false).problem;
+    const pecTwin = { ...pecProblem, objects: twin.objects.map((o) => ({ ...o, material: 'pec' })), materials: [] };
+    const r = runCli(lossy.problem), rTwin = runCli(twin), rPec = runCli(pecProblem), rPecTwin = runCli(pecTwin);
+    const loss = (x: { farField: { efficiency: number }[] }, base = rPec) => 1 - x.farField[0].efficiency / base.farField[0].efficiency;
     // Ballpark: sinusoidal current on the two arms, R' of a round wire. This thick dipole is
     // electrically longer than half a wave at 2.4 GHz, so its current stays nearer the feed
     // value along the arm than the sine (measured: up to 1.05 x mid-arm) and the real loss is higher.
@@ -225,8 +237,8 @@ describe.skipIf(!hasCli)('STEP pipeline vs programmatic geometry (native solver)
     for (let z = 0.0005; z < h; z += 1e-5) i2 += 2 * 1e-5 * (Math.sin(k * (h - z)) / Math.sin(k * h)) ** 2;
     const at = r.port.frequencies.findIndex((x: number) => x >= f);
     const sine = (rPerLength * i2) / r.port.zinRe[at];
-    console.log(`resistive dipole: loss ${(100 * loss(r)).toFixed(2)} % (cylinder twin ${(100 * loss(rTwin)).toFixed(2)} %, sinusoidal-current estimate ${(100 * sine).toFixed(2)} %)`);
-    expect(Math.abs(loss(r) / loss(rTwin) - 1)).toBeLessThan(0.05);
+    console.log(`resistive dipole: loss ${(100 * loss(r)).toFixed(2)} % (cylinder twin ${(100 * loss(rTwin, rPecTwin)).toFixed(2)} %, sinusoidal-current estimate ${(100 * sine).toFixed(2)} %)`);
+    expect(Math.abs(loss(r) / loss(rTwin, rPecTwin) - 1)).toBeLessThan(0.05);
     expect(loss(r) / sine).toBeGreaterThan(1);
     expect(loss(r) / sine).toBeLessThan(2);
   }, 600_000);

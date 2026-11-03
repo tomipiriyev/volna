@@ -30,6 +30,7 @@ malformed JSON with a message that names the field.
   "port": { "start": [x,y,z], "stop": [x,y,z], "axis": "z", "resistance": 50, "amplitude": 1 },
   "excitation": { "fMin": 0.5e9, "fMax": 1.5e9 },
   "metalLossFrequency": 0,                // Hz for the metal surface resistance; 0 = sqrt(fMin fMax)
+  "conformal": false,                     // conductors off the grid lines: conformal faces, not staircases
   "portFrequencies": 401,
   "farField": { "frequencies": [1e9], "marginCells": 4, "thetaStep": 2, "phiStep": 2, "quadTheta": 48, "quadPhi": 96 },
   "termination": { "energyDb": -60, "maxSteps": 200000 },
@@ -42,6 +43,10 @@ malformed JSON with a message that names the field.
 
 - **Material names.** `pec` is reserved for the perfect conductor; `vacuum`
   is reserved too. Names must be unique.
+- **Conformal.** With `conformal`, meshes, cylinders and boxes with volume keep
+  their true shape in the cells they cut (docs/physics.md). If anything is cut,
+  the Courant number becomes at most 0.8. The results' mesh report gains
+  `conformal` with the cut faces, capped faces and the update's largest eigenvalue.
 - **Metals.** `"type": "metal"` with a positive `conductivity` (S/m) makes a
   conductor with skin-effect loss (docs/physics.md, "Conductor loss"); it is
   voxelized like `pec`. A metal wire box (zero extent on two axes) needs its
@@ -49,7 +54,7 @@ malformed JSON with a message that names the field.
   thick compared with the skin depth) and `currentFaces` (2: both faces,
   default; 1: one face). A mesh that is a straight round wire may give
   `"wire": {"axis", "radius"}`, and cylinder primitives at least two
-  diameters long count as round wires; their loss is calibrated to the round
+  diameters long count as round wires; without `conformal` their loss is calibrated to the round
   wire's resistance per length. Sheets must be `pec` or a metal.
 - **Degenerate boxes.** A box with min = max on one axis is a sheet, and on
   two axes a wire. Both must lie on grid lines to have any effect.

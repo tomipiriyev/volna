@@ -1,5 +1,50 @@
 # Changelog
 
+## Conformal conductors (2026-11-03)
+
+### Added
+- **Conformal faces** (Dey-Mittra) for conductors off the grid lines: partly
+  covered edges stay active, and the faces they touch use their true open lengths
+  and area, in a sparse pass after the bulk H update, on the CPU and in WebGPU
+  (`cutFaces` kernel). The app turns this on when a conductor has curved or oblique
+  faces, with a "Conformal conductors" switch on the Mesh step. Problems with
+  conductors only on grid lines are unchanged, bitwise.
+- **Stability without a tiny time step:** Courant number 0.8 when anything is cut,
+  capped coefficients on small faces, and the update's largest eigenvalue measured
+  at setup, tightening the cap if needed.
+- **Metal loss on the true surface** through the cut faces, including grid lines
+  tangent to round bodies. Round-wire calibration now applies only with conformal
+  mode off, and the `METAL_CURVED` warning only then too.
+- Tests: `cpp/tests/test_conformal.cpp`, `app/e2e/conformal.spec.ts`, a validation
+  section on a round metal dipole, and that dipole in the GPU comparisons.
+
+### Fixed
+- **The ray caster was not watertight.** Rounding could make a ray on an edge shared
+  by two triangles miss the surface or hit it twice, leaving a stray conductor edge
+  or a gap. One stray edge in a test cavity shifted its resonance by 5–7%, in
+  staircase mode as well, and tessellation diagonals through grid nodes could
+  trigger it in any STEP model. Shared edges now give both triangles exactly
+  opposite values.
+
+### Verification
+- Exact answers: see the table in docs/physics.md. Frequency errors are 20–50×
+  below staircasing on circular, rotated and spherical cavities, with an observed
+  order of about 1.3. Q of curved and oblique metal walls is within 1%, and of a
+  coaxial rod 4–8 cells across within 2.1%. No growth in 200,000 steps.
+- Antennas: a top-hat dipole rotated 45° approaches its axis-aligned twin smoothly
+  (+0.59, +0.29, +0.08% at 2.5, 1.25, 0.625 mm), against erratic staircase results
+  (+1.70, −0.87, +0.33%). A slender round dipole's resonance barely changes: its
+  error comes from the feed gap, not the surface.
+- GPU vs CPU fields after 1000 steps, conformal metal dipole: 6e-7.
+
+### Known limitations
+- Dielectrics, sheet outlines and thin-wire lines are not conformal.
+- Convergence is about order 1.3, not 2 (capped faces).
+- 24% more time steps than Courant 0.99 for models with cut faces.
+- No automatic refinement: small features still need a finer mesh.
+- Errors from the feed gap and conductor edges remain (about 0.5–3% in f_res on the
+  top-hat dipole at these grids), including on axis-aligned models.
+
 ## Open-source release (2026-11-02)
 
 ### Added

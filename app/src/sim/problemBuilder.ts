@@ -5,7 +5,7 @@
 import { isConductor, type GeomClass } from '../model/classify';
 import { computeDiagnostics, unitScale, type ProjectSnapshot } from '../model/diagnostics';
 import { lossFitFrequency, materialSigma } from '../model/materials';
-import type { Assignment, Axis, Diagnostic, Vec3 } from '../model/types';
+import type { Assignment, Axis, CadBody, Diagnostic, Vec3 } from '../model/types';
 import { DEFAULT_MESH_SETTINGS, generateMesh, type MeshBody, type MeshResult, type MeshSettings } from './mesher';
 
 export interface SimBody {
@@ -64,6 +64,9 @@ function cellsAcross(lines: number[], lo: number, hi: number): number {
     }
   return n ? (hi - lo) / (len / n) : 0;
 }
+
+/** A body the grid lines cannot follow: it has curved or oblique faces. */
+const offGrid = (b: CadBody) => b.faces.some((f) => !f.planar || f.axisAligned === null);
 
 /** Errors that make a simulation meaningless, on top of the project diagnostics. */
 export function blockingIssues(s: ProjectSnapshot): Diagnostic[] {
@@ -144,6 +147,18 @@ export function planMesh(s: ProjectSnapshot, meshSettings: MeshSettings = DEFAUL
     if (!changed) break;
     mesh = meshIt();
   }
+  if (!settings.conformal)
+    for (const b of active) {
+      const a = s.assignments[b.id], c = classes.get(b.id);
+      if (a.conductor?.kind === 'metal' && c?.type === 'solid' && !c.roundWire && offGrid(b))
+        diagnostics.push({
+          code: 'METAL_CURVED',
+          severity: 'warning',
+          message: `"${b.name}" has curved or oblique faces. On the grid they become staircases whose corners concentrate the current, so its conductor loss can be overstated by up to about 70%.`,
+          fix: 'Turn on conformal conductors on the Mesh step.',
+          bodyIds: [b.id],
+        });
+    }
   for (const n of mesh.notes) diagnostics.push({ code: 'MESH_NOTE', severity: 'warning', message: n });
   if (mesh.cells > settings.maxCells)
     diagnostics.push({ code: 'MESH_TOO_LARGE', severity: 'error', message: `The grid has ${mesh.cells.toLocaleString()} cells, above the limit of ${settings.maxCells.toLocaleString()}.`, fix: 'Lower f_max or cells per wavelength, or raise the limit.' });
@@ -186,6 +201,8 @@ export function buildSimulation(
     return name;
   };
   const objects: Record<string, unknown>[] = [];
+  // Conductors on the grid lines need none of this, and their problem stays as it was.
+  const conformal = settings.conformal && active.some((b) => isConductor(s.assignments[b.id].role) && classes.get(b.id)?.type === 'solid' && offGrid(b));
   for (const b of active) {
     const a = s.assignments[b.id];
     const cls = classes.get(b.id)!;
@@ -216,8 +233,8 @@ export function buildSimulation(
       objects.push({ type: 'sheet', name: b.name, material, axis: sp.axis, coord: sp.coord, ...sheetLoss, positions: f32b64(scaled(t.positions, scale)), indices: u32b64(t.indices) });
     } else if (cls.type === 'solid') {
       if (!t) throw new Error(`missing simulation tessellation for "${b.name}"`);
-      // A round metal wire voxelized as a solid is calibrated to the round wire's resistance (staircase corners would overstate its loss).
-      const wire = metal && cls.roundWire ? { wire: { axis: cls.roundWire.axis, radius: cls.roundWire.radius } } : {};
+      // Without conformal faces, a round metal wire voxelized as a solid is calibrated to the round wire's resistance (staircase corners would overstate its loss).
+      const wire = metal && cls.roundWire && !conformal ? { wire: { axis: cls.roundWire.axis, radius: cls.roundWire.radius } } : {};
       objects.push({ type: 'mesh', name: b.name, material, ...wire, positions: f32b64(scaled(t.positions, scale)), indices: u32b64(t.indices) });
     } else {
       throw new Error(`"${b.name}" cannot be represented on the grid (${cls.type}).`);
@@ -235,6 +252,7 @@ export function buildSimulation(
     port: { start: feed.start, stop: feed.end, axis: port.axis, resistance: port.z0, amplitude: port.amplitude },
     excitation: { fMin: s.freq.fMin, fMax: s.freq.fMax },
     ...(metalNames.size ? { metalLossFrequency: fFit } : {}),
+    ...(conformal ? { conformal: true } : {}),
     portFrequencies: 401,
     farField: { frequencies: s.freq.farField, marginCells: settings.farFieldMarginCells, thetaStep: 2, phiStep: 2, quadTheta: 48, quadPhi: 96 },
     termination: { energyDb: -60, maxSteps: 200000 },

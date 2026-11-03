@@ -1,7 +1,7 @@
 // M5: the WebGPU time loop against the C++ solver, in Chromium's new headless
 // mode (channel 'chromium'), which exposes the real GPU (Metal on macOS); the
 // default headless shell has no WebGPU adapter. Acceptance:
-//   fields after 1000 steps: relative L2 < 1e-4 (dipole and STEP patch)
+//   fields after 1000 steps: relative L2 < 1e-4 (dipole, STEP patch, conformal round dipole)
 //   complete runs: Zin within 0.5 %, D within 0.02 dB; speedup reported
 // plus a WebGPU run through the app and the device-lost fallback to the CPU.
 import { expect, test } from '@playwright/test';
@@ -15,7 +15,7 @@ test('GPU self-test: fields after 1000 steps match the C++ solver', async ({ pag
   await page.getByRole('tab', { name: 'Solver' }).click();
   await page.getByTestId('run-gpu-selftest').click();
   const rows = page.getByTestId('gpu-selftest-row');
-  await expect(rows).toHaveCount(2, { timeout: 200_000 });
+  await expect(rows).toHaveCount(3, { timeout: 200_000 });
   for (const row of await rows.all()) {
     const worst = Number(await row.getAttribute('data-worst'));
     expect(worst).toBeLessThan(1e-4);
@@ -29,7 +29,7 @@ test('complete runs on WebGPU reproduce the CPU solver (Zin, D) and are faster',
   await page.getByRole('tab', { name: 'Solver' }).click();
   await page.getByTestId('run-gpu-compare').click();
   const rows = page.getByTestId('gpu-compare-row');
-  await expect(rows).toHaveCount(2, { timeout: 560_000 });
+  await expect(rows).toHaveCount(3, { timeout: 560_000 });
   for (const row of await rows.all()) {
     expect(Number(await row.getAttribute('data-zin'))).toBeLessThan(0.005);
     expect(Number(await row.getAttribute('data-d'))).toBeLessThan(0.02);

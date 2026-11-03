@@ -32,11 +32,20 @@ approximately. Each milestone updates it.
   (for example, near the refined feed) is voxelized as a solid instead, and
   the grid is regenerated with its faces as grid lines. The reverse change
   never happens.
-- **Staircasing.** Solids become PEC edges (at least 50% of the edge inside)
-  and dielectrics become whole cells (by cell centre). Curved and oblique
-  surfaces therefore carry an O(Δ) geometry error. Axis-aligned faces are
-  exact, because the mesher puts grid lines on every solid's bounding-box
-  faces, but faces inside the box (steps, holes) are not snapped.
+- **Curved and oblique conductors** use conformal faces by default (see
+  physics.md): in closed cavities, frequency errors are about 20–50× below
+  staircasing, with a measured convergence order of about 1.3, not 2, and 24% more
+  time steps. In antennas the gain is consistency: results stop depending on the
+  orientation and converge smoothly. The feed gap and conductor edges still leave
+  about 0.5–3% in f_res on a top-hat dipole at λ/190–λ/770, with or without
+  conformal faces. Check convergence for any design you depend on. Features smaller
+  than about two cells are still poorly resolved, and nothing refines automatically.
+- **Staircasing remains** for dielectrics (whole cells, by cell centre), for sheet
+  outlines, and for conductors when conformal mode is turned off (edges at least
+  50% inside). Those surfaces carry an O(Δ) geometry error. Axis-aligned faces
+  are exact, because the mesher puts grid lines on every solid's bounding-box
+  faces; without conformal mode, faces inside the box (steps, holes) are not
+  snapped.
 - **Thin conductor plates** (axis-aligned, thinner than a cell) become
   zero-thickness PEC sheets. They snap to a feed end, then to an existing
   grid line, then to their mid-plane, and the snap distance is reported.
@@ -98,16 +107,10 @@ approximately. Each milestone updates it.
   zero-thickness resistive sheet also passes a fraction ~2R/η₀ of the field
   (a real sheet thicker than δ blocks it); this only matters in closed,
   resonant enclosures.
-- **Curved metal surfaces** become staircases whose corners concentrate the
-  current, which overstates their loss by up to about 70%. Straight round
-  wires are calibrated and exact (see physics.md); other curved metal parts
-  get a warning.
-- Isotropic dielectrics only, with εr and a constant σ. An entered tanδ is
-  assumed to hold in the simulated band. σ is fitted at the band centre,
-  √(f_min·f_max), where the tanδ is exact. Toward the band edges the
-  effective tanδ falls as 1/f; for a 3:1 band it is off by up to 73%. For
-  accurate loss over a wide band, narrow the band or run several bands.
-  Magnetic, dispersive and anisotropic materials are not implemented.
+- **Curved metal surfaces** get exact surface loss in conformal mode. With it
+  turned off, staircase corners concentrate the current, which overstates their
+  loss by up to about 70% (straight round wires are calibrated instead, and other
+  parts get a warning).
 
 ## Solver
 

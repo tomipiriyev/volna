@@ -200,6 +200,60 @@ for (const name of ['dipole', 'monopole']) {
   check('mesh refinement', 'observed convergence order of f_res', p, 'info (PEC edges and the feed gap are field singularities, so convergence is slower than O(h²))', true, () => orderText);
 }
 
+// ------------------------------------------------------------------ 4b. conformal conductors
+{
+  // A top-hat dipole, whose resonance follows the hats' shape, rotated about the feed axis:
+  // the same antenna, against its axis-aligned twin on the same grid lines.
+  const t = TOL.conformal;
+  const rotated = (tag, deg, conformal) =>
+    runCase(`dipole_hat_h${tag}@r${deg}${conformal ? 'c' : 's'}`, (p) => {
+      const c = Math.cos((deg * Math.PI) / 180), s = Math.sin((deg * Math.PI) / 180);
+      for (const o of p.objects) {
+        if (o.type !== 'mesh') continue;
+        for (let i = 0; i < o.positions.length; i += 3) {
+          const [x, y] = [o.positions[i], o.positions[i + 1]];
+          o.positions[i] = c * x - s * y;
+          o.positions[i + 1] = s * x + c * y;
+        }
+      }
+      p.conformal = conformal;
+    });
+  const levels = ['2.5', '1.25'].map((tag) => {
+    const twin = runCase(`dipole_hat_h${tag}`);
+    const f0 = resonance(twin.port).f;
+    const gap = (r) => resonance(r.port).f / f0 - 1;
+    const c30 = rotated(tag, 30, true), c45 = rotated(tag, 45, true), s30 = rotated(tag, 30, false), s45 = rotated(tag, 45, false);
+    const out = { tag, f0, c30: gap(c30), c45: gap(c45), s30: gap(s30), s45: gap(s45), effTwin: ff(twin, 0.75e9).efficiency, effC: Math.max(Math.abs(ff(c30, 0.75e9).efficiency - ff(twin, 0.75e9).efficiency), Math.abs(ff(c45, 0.75e9).efficiency - ff(twin, 0.75e9).efficiency)) };
+    check('conformal conductors', `hats rotated 30° / 45°, h = ${tag} mm, f_res vs axis-aligned twin (${ghz(f0)}): staircase ${pct(out.s30)} / ${pct(out.s45)}, conformal ${pct(out.c30)} / ${pct(out.c45)}`, 0, 'info', true, () => '—');
+    return out;
+  });
+  const [coarse, fine] = levels;
+  const spread = (a, b) => Math.abs(a - b);
+  check('conformal conductors', 'conformal: f_res difference between 30° and 45°, 2.5 mm cells', spread(coarse.c30, coarse.c45), `< ${pct(t.spreadCoarse)}`, spread(coarse.c30, coarse.c45) < t.spreadCoarse, pct);
+  check('conformal conductors', 'conformal: f_res difference between 30° and 45°, 1.25 mm cells', spread(fine.c30, fine.c45), `< ${pct(t.spreadFine)}`, spread(fine.c30, fine.c45) < t.spreadFine, pct);
+  const gain = Math.min(spread(coarse.s30, coarse.s45) / spread(coarse.c30, coarse.c45), spread(fine.s30, fine.s45) / spread(fine.c30, fine.c45));
+  check('conformal conductors', 'that difference, staircase / conformal (worse of the two grids)', gain, `> ${t.minSpreadGain}`, gain > t.minSpreadGain, (v) => v.toFixed(1));
+  const worst45 = Math.abs(fine.c45);
+  check('conformal conductors', 'conformal: f_res vs twin at 45°, 1.25 mm cells', worst45, `< ${pct(t.gapFine)}`, worst45 < t.gapFine, pct);
+  const shrink = Math.abs(coarse.c45 / fine.c45);
+  check('conformal conductors', 'conformal: that gap shrinks when the cell halves (ratio)', shrink, `> ${t.minShrink}`, shrink > t.minShrink, (v) => v.toFixed(2));
+  const dEff = Math.max(coarse.effC, fine.effC);
+  check('conformal conductors', 'conformal: radiation efficiency vs twin (0.75 GHz)', dEff, `< ${t.effAbs}`, dEff < t.effAbs, (v) => v.toFixed(5));
+
+  // A slender round metal dipole: its resonance follows length and feed gap, not surface shape,
+  // so conformal faces change little here. Reported, with no limit.
+  const tags = [['2.5', 2.5], ['1.25', 1.25], ['0.833', 2.5 / 3]];
+  const run = (tag, staircase) => {
+    const r = staircase ? runCase(`dipole_round_h${tag}@staircase`, (p) => { p.conformal = false; }) : runCase(`dipole_round_h${tag}`);
+    return { f: resonance(r.port).f, eff: ff(r, 0.95e9).efficiency };
+  };
+  const conf = tags.map(([tag]) => run(tag, false)), stair = tags.map(([tag]) => run(tag, true));
+  tags.forEach(([, h], i) => {
+    const e = (x) => `${(100 * (x.f / conf[2].f - 1)).toFixed(2)} %`;
+    check('conformal conductors', `round dipole, h = ${h.toFixed(3)} mm, f_res vs finest conformal: staircase ${e(stair[i])}, conformal ${e(conf[i])}; efficiency ${stair[i].eff.toFixed(4)} / ${conf[i].eff.toFixed(4)}`, 0, 'info', true, () => '—');
+  });
+}
+
 // ------------------------------------------------------------------ 5. far-field angular resolution
 {
   const t = TOL.angular;
@@ -334,7 +388,7 @@ if (args.has('--wasm')) {
 // ------------------------------------------------------------------ report
 const failed = rows.filter((r) => !r.pass);
 const groups = [...new Set(rows.map((r) => r.group))];
-let md = `# Validation report (M2–M4)\n\nGenerated ${new Date().toISOString()} by \`node validation/run_validation.mjs${process.argv.slice(2).map((a) => ' ' + a).join('')}\`.\n\n`;
+let md = `# Validation report\n\nGenerated ${new Date().toISOString()} by \`node validation/run_validation.mjs${process.argv.slice(2).map((a) => ' ' + a).join('')}\`.\n\n`;
 md += `**${rows.length - failed.length} / ${rows.length} checks passed.** Tolerances: \`validation/tolerances.json\`. Reference solver: openEMS 0.37 on identical grid lines.\n\n`;
 for (const g of groups) {
   md += `## ${g}\n\n| Check | Value | Limit | Result |\n|---|---|---|---|\n`;
