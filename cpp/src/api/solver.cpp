@@ -1,7 +1,6 @@
 #include "antsim/solver.hpp"
 #include "antsim/constants.hpp"
 #include "antsim/metal.hpp"
-#include "antsim/voxelize.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -39,6 +38,15 @@ bool insideCylinder(const ObjectSpec& o, const double pt[3], double tol) {
     const double du = pt[u] - o.center[0], dv = pt[v] - o.center[1];
     return pt[a] >= o.range[0] - tol && pt[a] <= o.range[1] + tol && du * du + dv * dv <= (o.radius + tol) * (o.radius + tol);
 }
+
+// Conformal: a covered or open stretch below this fraction of an edge is rounded away, so
+// float32 CAD coordinates on a grid line do not create slivers.
+constexpr double kCutSnap = 1e-3;
+// Leapfrog needs the update's largest eigenvalue below 4; a uniform grid at Courant 0.99 sits at 3.92.
+constexpr double kStableEigenvalue = 3.98;
+// Courant number when conductors cut faces: 0.8 costs 24 % more steps than 0.99, and leaves
+// room for most cut faces uncapped (measured: 0.9 nearly doubles the resonance error).
+constexpr double kConformalCourant = 0.8;
 
 std::array<double, 3> objectMin(const ObjectSpec& o) {
     if (o.kind != ObjectSpec::Kind::Cylinder) return o.min; // boxes; meshes and sheets store their bbox here
@@ -99,15 +107,28 @@ MemoryEstimate estimateMemory(const Problem& p) {
 Solver::Solver(const Problem& p) : p_(p) {
     const int threads = p.threads > 0 ? std::min(p.threads, maxThreads()) : maxThreads();
     pool_ = std::make_unique<ThreadPool>(threads);
-    f_ = std::make_unique<YeeFields>(toMetres(p.grid, p.unit), p.courant);
     std::array<bool, 6> pmc{};
     for (int i = 0; i < 6; ++i) pmc[i] = p.boundaries[i] == Boundary::Pmc;
+    f_ = std::make_unique<YeeFields>(toMetres(p.grid, p.unit), p.courant);
     f_->setPmcFaces(pmc);
     rasterize();
+    if (!partial_.empty() && p.courant > kConformalCourant) {
+        // Cut faces need headroom below the Courant limit; the material table holds dt, so start over.
+        partial_.clear();
+        metalRs_.clear();
+        surfaceEdges_.clear();
+        report_ = MeshReport{};
+        diags_.clear();
+        warnings_.clear();
+        f_ = std::make_unique<YeeFields>(toMetres(p.grid, p.unit), kConformalCourant);
+        f_->setPmcFaces(pmc);
+        rasterize();
+    }
     if (p.hasPort) {
         setupPort();
         checkDcPath();
     }
+    if (!partial_.empty()) buildCutFaces();
     cpml_ = std::make_unique<Cpml>(*f_, p.boundaries, p.pml);
     setupFarField();
     pulse_ = GaussianPulse::forBand(p.fMin, p.fMax);
@@ -292,9 +313,140 @@ void Solver::rasterize() {
         if (const MaterialSpec* metal = metalOf(o)) {
             tag = f.materials.addRaw(0.0f, 0.0f, 1.0, 0.0, true);
             metalTags.push_back({tag, metal, o, ob.report});
+            metalRs_[tag] = surfaceResistance(metal->conductivity, p_.metalLossFrequency > 0 ? p_.metalLossFrequency : std::sqrt(p_.fMin * p_.fMax));
         }
         long long marked = 0;
-        if (o.kind == ObjectSpec::Kind::Box || o.kind == ObjectSpec::Kind::Cylinder) {
+        // Conformal: sorts an edge [x[i], x[i + 1]] of line (jp, jq) by the conductor's merged
+        // inside intervals: inside, outside or partly covered, with the normals at its cuts.
+        struct Cut {
+            int c;
+            std::size_t at;
+            PartialEdge edge;
+        };
+        auto sortEdge = [&](int c, const int* ijk, const std::vector<Interval>& iv, double x0, double x1, const auto& normalAt, long long& count, std::vector<Cut>& cuts) {
+            const double len = x1 - x0, cov = coveredLength(iv, x0, x1);
+            if (cov <= kCutSnap * len) return;
+            const std::size_t at = f.idx(ijk[0], ijk[1], ijk[2]);
+            if (cov >= (1.0 - kCutSnap) * len) {
+                auto& e = f.M(c)[at];
+                if (!f.materials.isConductor(e)) ++count;
+                e = tag;
+                return;
+            }
+            Cut cut{c, at, {}};
+            cut.edge.owner = tag;
+            for (const auto& [lo, hi] : iv) {
+                if (hi <= x0 || lo >= x1) continue;
+                cut.edge.covered.emplace_back(std::max(lo, x0) - x0, std::min(hi, x1) - x0);
+                for (double t : {lo, hi})
+                    if (t > x0 + kCutSnap * len && t < x1 - kCutSnap * len) {
+                        double n[3] = {0, 0, 0};
+                        if (normalAt(t, n))
+                            for (int a = 0; a < 3; ++a) cut.edge.normal[a] += n[a];
+                    }
+            }
+            cuts.push_back(std::move(cut));
+        };
+        auto keepCuts = [&](std::vector<Cut>& cuts) {
+            for (auto& cut : cuts) {
+                PartialEdge& e = partial_[edgeKey(cut.c, cut.at)];
+                e.covered.insert(e.covered.end(), cut.edge.covered.begin(), cut.edge.covered.end());
+                for (int a = 0; a < 3; ++a) e.normal[a] += cut.edge.normal[a];
+                e.owner = cut.edge.owner;
+            }
+        };
+        const bool solid = o.kind == ObjectSpec::Kind::Cylinder ||
+                           (o.kind == ObjectSpec::Kind::Box && o.max[0] > o.min[0] && o.max[1] > o.min[1] && o.max[2] > o.min[2]);
+        if (p_.conformal && solid) {
+            // Boxes and cylinders: exact intervals along each edge line.
+            const auto lo = objectMin(o), hi = objectMax(o);
+            std::vector<Cut> cuts;
+            for (int c = 0; c < 3; ++c) {
+                const int pa = (c + 1) % 3, qa = (c + 2) % 3;
+                const auto rp = nodeRange(g.nodes(pa), lo[pa], hi[pa], tol), rq = nodeRange(g.nodes(qa), lo[qa], hi[qa], tol);
+                const auto& xc = g.nodes(c);
+                std::vector<Interval> iv(1);
+                for (int jp = rp.first; jp <= rp.second; ++jp)
+                    for (int jq = rq.first; jq <= rq.second; ++jq) {
+                        double pt[3] = {0, 0, 0};
+                        pt[pa] = g.nodes(pa)[jp];
+                        pt[qa] = g.nodes(qa)[jq];
+                        double centre[3] = {0, 0, 0};
+                        double a0 = lo[c], a1 = hi[c];
+                        if (o.kind == ObjectSpec::Kind::Cylinder) {
+                            const int ax = o.axis, u = ax == 0 ? 1 : 0, v = ax == 2 ? 1 : 2;
+                            centre[u] = o.center[0];
+                            centre[v] = o.center[1];
+                            if (c == ax) {
+                                if (!insideCylinder(o, pt, tol) && (pt[u] - centre[u]) * (pt[u] - centre[u]) + (pt[v] - centre[v]) * (pt[v] - centre[v]) > (o.radius + tol) * (o.radius + tol)) continue;
+                            } else {
+                                if (pt[ax] < o.range[0] - tol || pt[ax] > o.range[1] + tol) continue;
+                                const int w = u == c ? v : u;
+                                const double dw = pt[w] - centre[w], r2 = o.radius * o.radius - dw * dw;
+                                if (r2 <= 0) continue; // a tangent line touches, but is not covered
+                                a0 = centre[c] - std::sqrt(r2);
+                                a1 = centre[c] + std::sqrt(r2);
+                            }
+                        }
+                        iv[0] = {a0, a1};
+                        auto normalAt = [&](double t, double* n) {
+                            if (o.kind == ObjectSpec::Kind::Box || (o.kind == ObjectSpec::Kind::Cylinder && c == o.axis)) {
+                                n[c] = t > 0.5 * (a0 + a1) ? 1 : -1;
+                                return true;
+                            }
+                            double q[3] = {pt[0], pt[1], pt[2]};
+                            q[c] = t;
+                            double l2 = 0;
+                            for (int a = 0; a < 3; ++a)
+                                if (a != o.axis) l2 += (q[a] - centre[a]) * (q[a] - centre[a]);
+                            for (int a = 0; a < 3; ++a)
+                                if (a != o.axis) n[a] = (q[a] - centre[a]) / std::sqrt(l2);
+                            return true;
+                        };
+                        for (int i = std::max(0, static_cast<int>(std::upper_bound(xc.begin(), xc.end(), a0) - xc.begin()) - 1); i < n[c] && xc[i] < a1; ++i) {
+                            int ijk[3];
+                            ijk[c] = i;
+                            ijk[pa] = jp;
+                            ijk[qa] = jq;
+                            sortEdge(c, ijk, iv, xc[i], xc[i + 1], normalAt, marked, cuts);
+                        }
+                    }
+            }
+            keepCuts(cuts);
+        } else if (p_.conformal && o.kind == ObjectSpec::Kind::Mesh) {
+            const TriMesh& mesh = *ob.mesh;
+            const double eps = 1e-3 * tol;
+            for (int c = 0; c < 3; ++c) {
+                const int pa = (c + 1) % 3, qa = (c + 2) % 3;
+                const AxisRayCaster rc(mesh, c);
+                const auto rp = nodeRange(g.nodes(pa), mesh.lo[pa], mesh.hi[pa], tol);
+                const auto rq = nodeRange(g.nodes(qa), mesh.lo[qa], mesh.hi[qa], tol);
+                const auto& xc = g.nodes(c);
+                std::vector<long long> counts(pool_->size(), 0);
+                std::vector<std::vector<Cut>> cuts(pool_->size());
+                pool_->run([&](int tid, int nt) {
+                    const auto [j0, j1] = ThreadPool::range(rp.first, rp.second + 1, tid, nt);
+                    std::vector<Interval> iv;
+                    for (int jp = j0; jp < j1; ++jp)
+                        for (int jq = rq.first; jq <= rq.second; ++jq) {
+                            rc.inclusiveIntervals(g.nodes(pa)[jp], g.nodes(qa)[jq], eps, iv);
+                            if (iv.empty()) continue;
+                            auto normalAt = [&](double t, double* nrm) { return rc.normalAt(g.nodes(pa)[jp], g.nodes(qa)[jq], t, nrm); };
+                            const auto rc0 = std::lower_bound(xc.begin(), xc.end(), iv.front().first - tol) - xc.begin();
+                            const int i0 = std::max<int>(0, static_cast<int>(rc0) - 1);
+                            for (int i = i0; i < n[c] && xc[i] <= iv.back().second + tol; ++i) {
+                                int ijk[3];
+                                ijk[c] = i;
+                                ijk[pa] = jp;
+                                ijk[qa] = jq;
+                                sortEdge(c, ijk, iv, xc[i], xc[i + 1], normalAt, counts[tid], cuts[tid]);
+                            }
+                        }
+                });
+                for (auto cnt : counts) marked += cnt;
+                for (auto& per : cuts) keepCuts(per);
+            }
+        } else if (o.kind == ObjectSpec::Kind::Box || o.kind == ObjectSpec::Kind::Cylinder) {
             const auto lo = objectMin(o), hi = objectMax(o);
             std::pair<int, int> r[3];
             for (int a = 0; a < 3; ++a) r[a] = nodeRange(g.nodes(a), lo[a], hi[a], tol);
@@ -404,6 +556,7 @@ void Solver::rasterize() {
             diag("OBJECT_EMPTY", "warning", "\"" + r.name + "\" produced no " + (r.conductor ? "conductor edges" : "dielectric cells") +
                                                  " on this grid (smaller than a cell, or fully covered by another object)");
     }
+    resolvePartialEdges();
     if (!metalTags.empty()) applyMetalLoss(metalTags);
     for (int c = 0; c < 3; ++c)
         for (auto& e : f.E(c)) e = 0.0f;
@@ -450,6 +603,22 @@ void Solver::applyMetalLoss(const std::vector<MetalTag>& tags) {
                 }
     });
 
+    // Cells holding a partly covered edge: their surface loss belongs to the cut faces.
+    std::vector<std::uint8_t> cellCut(partial_.empty() ? 0 : cellCond.size(), 0);
+    for (const auto& [key, edge] : partial_) {
+        const int c = static_cast<int>(key / f.nodeCount());
+        std::size_t r = key % f.nodeCount();
+        const int ijk[3] = {static_cast<int>(r / f.sx()), static_cast<int>((r % f.sx()) / f.sy()), static_cast<int>(r % f.sy())};
+        const int u = (c + 1) % 3, v = (c + 2) % 3;
+        for (int du = -1; du <= 0; ++du)
+            for (int dv = -1; dv <= 0; ++dv) {
+                int q[3] = {ijk[0], ijk[1], ijk[2]};
+                q[u] += du;
+                q[v] += dv;
+                if (q[0] >= 0 && q[1] >= 0 && q[2] >= 0 && q[0] < n[0] && q[1] < n[1] && q[2] < n[2]) cellCut[cellAt(q[0], q[1], q[2])] = 1;
+            }
+    }
+
     // Round wires (cylinders, meshes marked as wires) carry their current on a
     // staircase cross-section, where convex corners and one-cell fins concentrate
     // it; a uniform surface rule would then overstate the loss of the smooth wire.
@@ -464,10 +633,11 @@ void Solver::applyMetalLoss(const std::vector<MetalTag>& tags) {
     std::vector<WireCal> wireCal(tags.size());
     for (std::size_t t = 0; t < tags.size(); ++t) {
         const ObjectSpec& o = tags[t].o;
-        // Cylinders count as wires when at least two diameters long (not discs).
+        // Cylinders count as wires when at least two diameters long (not discs). In
+        // conformal mode the cut faces carry the true surface, so no calibration is needed.
         const bool rod = o.kind == ObjectSpec::Kind::Cylinder && o.range[1] - o.range[0] >= 4 * o.radius;
         const int c = rod ? o.axis : o.kind == ObjectSpec::Kind::Mesh ? o.wireAxis : -1;
-        if (c < 0 || !(o.radius > 0)) continue;
+        if (p_.conformal || c < 0 || !(o.radius > 0)) continue;
         const int u = (c + 1) % 3, v = (c + 2) % 3;
         const auto lo = objectMin(o), hi = objectMax(o);
         const auto& xc = f.grid().nodes(c);
@@ -558,6 +728,7 @@ void Solver::applyMetalLoss(const std::vector<MetalTag>& tags) {
         std::size_t tag;
     };
     std::vector<std::vector<Lossy>> found(pool_->size());
+    std::vector<std::vector<std::pair<std::uint64_t, std::uint16_t>>> nearCutEdges(pool_->size());
     std::vector<std::vector<long long>> unmodelled(pool_->size(), std::vector<long long>(tags.size(), 0));
     for (int c = 0; c < 3; ++c) {
         const int u = (c + 1) % 3, v = (c + 2) % 3;
@@ -599,8 +770,16 @@ void Solver::applyMetalLoss(const std::vector<MetalTag>& tags) {
                             a1[c] += 1;
                             return cond(c, e0) && cond(c, e1) && cond(w, a0) && cond(w, a1);
                         };
+                        auto cutIs = [&](int du, int dv) {
+                            if (cellCut.empty()) return false;
+                            int q[3] = {i, j, k};
+                            q[u] += du;
+                            q[v] += dv;
+                            if (q[u] < 0 || q[u] >= n[u] || q[v] < 0 || q[v] >= n[v]) return false;
+                            return cellCut[cellAt(q[0], q[1], q[2])] != 0;
+                        };
                         double g = 0; // sum of width / resistance per square
-                        bool interior = true;
+                        bool interior = true, nearCut = false;
                         for (int w : {u, v})
                             for (int s : {0, -1}) {
                                 const int cw = ijk[w] + s;
@@ -610,11 +789,19 @@ void Solver::applyMetalLoss(const std::vector<MetalTag>& tags) {
                                 const bool b = w == u ? cellIs(s, 0) : cellIs(0, s);
                                 if (a && b) continue;
                                 interior = false;
+                                if (w == u ? (cutIs(s, -1) || cutIs(s, 0)) : (cutIs(-1, s) || cutIs(0, s))) {
+                                    nearCut = true;
+                                    continue;
+                                }
                                 const double half = 0.5 * f.d[w][cw];
                                 if (a != b) g += half / rSolid;
                                 else if (faceFull(w, s)) g += half / rSheet;
                             }
                         if (interior) continue;
+                        if (nearCut) {
+                            nearCutEdges[tid].push_back({edgeKey(c, at), t.id});
+                            continue;
+                        }
                         const WireCal& wc = wireCal[it->second];
                         if (wc.axis == c) {
                             const auto r = wc.rho.find({ijk[u], ijk[v]});
@@ -641,6 +828,9 @@ void Solver::applyMetalLoss(const std::vector<MetalTag>& tags) {
                     }
         });
     }
+
+    for (const auto& per : nearCutEdges)
+        for (const auto& [key, id] : per) surfaceEdges_[key] = id;
 
     // Conductivities rounded to 1e-4 (relative) so equal geometry shares a table entry.
     std::map<double, std::uint16_t> ids;
@@ -672,6 +862,7 @@ void Solver::applyMetalLoss(const std::vector<MetalTag>& tags) {
         const MetalTag& tg = tags[t];
         ObjectReport& r = report_.objects[tg.report];
         r.lossyEdges = lossyCount[t];
+        for (const auto& [key, edge] : partial_) r.lossyEdges += edge.owner == tg.id;
         const double sigma = tg.metal->conductivity, delta = skinDepth(sigma, fRef);
         diag("METAL_LOSS", "info",
              "\"" + r.name + "\": " + tg.metal->name + " (" + fmt(sigma, 3) + " S/m), R_s " + fmt(1e3 * surfaceResistance(sigma, fRef), 3) +
@@ -691,6 +882,272 @@ void Solver::applyMetalLoss(const std::vector<MetalTag>& tags) {
     }
 }
 
+bool Solver::inConductor(int c, std::size_t at) const {
+    const YeeFields& f = *f_;
+    if (f.materials.isConductor(f.M(c)[at])) return true;
+    if (partial_.empty()) return false;
+    const auto it = partial_.find(edgeKey(c, at));
+    if (it == partial_.end()) return false;
+    const int ijk[3] = {static_cast<int>(at / f.sx()), static_cast<int>((at % f.sx()) / f.sy()), static_cast<int>(at % f.sy())};
+    const double len = f.d[c][ijk[c]];
+    return coveredLength(it->second.covered, 0.0, len) >= 0.5 * len;
+}
+
+// Conformal: merges what each object recorded on an edge. Edges that end up (almost)
+// fully covered become conductor edges, and nearly free ones plain edges.
+void Solver::resolvePartialEdges() {
+    YeeFields& f = *f_;
+    for (auto it = partial_.begin(); it != partial_.end();) {
+        const int c = static_cast<int>(it->first / f.nodeCount());
+        const std::size_t at = it->first % f.nodeCount();
+        const int ijk[3] = {static_cast<int>(at / f.sx()), static_cast<int>((at % f.sx()) / f.sy()), static_cast<int>(at % f.sy())};
+        const double len = f.d[c][ijk[c]];
+        PartialEdge& e = it->second;
+        mergeIntervals(e.covered);
+        const double cov = coveredLength(e.covered, 0.0, len);
+        auto& m = f.M(c)[at];
+        if (f.materials.isConductor(m) || cov <= kCutSnap * len) {
+            it = partial_.erase(it);
+        } else if (cov >= (1.0 - kCutSnap) * len) {
+            m = e.owner;
+            it = partial_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// Conformal conductors (docs/physics.md): the H update of a cut face uses the open
+// lengths l_i of its contour edges and its open area A, with the conductor's surface
+// closing the contour along chords between the cuts:
+//   mu A dH/dt = -sum(+-l_i E_i) - l_c E_s,  E_s = R_s H / kappa on a metal's chord.
+// Faces with a small area would need a much shorter time step; instead their coefficients
+// are capped (dt^2 c^2 sum(l_i / (A dual_i)) <= beta) and the largest eigenvalue of the
+// whole update is measured, tightening the cap if needed. E updates are unchanged.
+void Solver::buildCutFaces() {
+    YeeFields& f = *f_;
+    const std::size_t nodes = f.nodeCount();
+    const int n[3] = {f.nx(), f.ny(), f.nz()};
+
+    // The faces touching a partly covered edge, in a fixed order.
+    std::vector<std::uint64_t> keys;
+    keys.reserve(4 * partial_.size());
+    for (const auto& [key, edge] : partial_) {
+        const int c = static_cast<int>(key / nodes);
+        const std::size_t at = key % nodes;
+        const int ijk[3] = {static_cast<int>(at / f.sx()), static_cast<int>((at % f.sx()) / f.sy()), static_cast<int>(at % f.sy())};
+        const int p = (c + 1) % 3, q = (c + 2) % 3;
+        // curl_c = dH_q/dp - dH_p/dq. H_q needs a cell along p, and H_p one along q.
+        if (ijk[p] < n[p]) keys.push_back(q * nodes + at);
+        if (ijk[p] > 0) keys.push_back(q * nodes + at - f.stride(p));
+        if (ijk[q] < n[q]) keys.push_back(p * nodes + at);
+        if (ijk[q] > 0) keys.push_back(p * nodes + at - f.stride(q));
+    }
+    for (const auto& [key, tag] : surfaceEdges_) {
+        const int c = static_cast<int>(key / nodes);
+        const std::size_t at = key % nodes;
+        const int ijk[3] = {static_cast<int>(at / f.sx()), static_cast<int>((at % f.sx()) / f.sy()), static_cast<int>(at % f.sy())};
+        const int p = (c + 1) % 3, q = (c + 2) % 3;
+        if (ijk[p] < n[p]) keys.push_back(q * nodes + at);
+        if (ijk[p] > 0) keys.push_back(q * nodes + at - f.stride(p));
+        if (ijk[q] < n[q]) keys.push_back(p * nodes + at);
+        if (ijk[q] > 0) keys.push_back(p * nodes + at - f.stride(q));
+    }
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+    struct Geom {
+        std::uint8_t hc, ec[4];
+        std::size_t hq, eq[4];
+        double len[4], stdWeight[4], dualPerp[4]; // open length, 1 / cell, dual spacing across the edge
+        int sign[4];
+        double area, chord, rs, kappa;
+    };
+    std::vector<Geom> geoms;
+    geoms.reserve(keys.size());
+    for (std::uint64_t key : keys) {
+        const int h = static_cast<int>(key / nodes);
+        const std::size_t at = key % nodes;
+        const int ijk[3] = {static_cast<int>(at / f.sx()), static_cast<int>((at % f.sx()) / f.sy()), static_cast<int>(at % f.sy())};
+        const int p = (h + 1) % 3, q = (h + 2) % 3;
+        const double dp = f.d[p][ijk[p]], dq = f.d[q][ijk[q]];
+        // Contour, counterclockwise in (p, q): bottom E_p, right E_q, top E_p (reversed), left E_q (reversed).
+        const std::size_t edgeAt[4] = {at, at + f.stride(p), at + f.stride(q), at};
+        const int edgeComp[4] = {p, q, p, q};
+        const double x0[4] = {0, dp, dp, 0}, y0[4] = {0, 0, dq, dq};
+        const double dirX[4] = {1, 0, -1, 0}, dirY[4] = {0, 1, 0, -1};
+        const double edgeLen[4] = {dp, dq, dp, dq};
+        std::vector<std::array<double, 4>> segs; // open stretches: x0 y0 x1 y1
+        Geom g{};
+        g.hc = static_cast<std::uint8_t>(h);
+        g.hq = at;
+        g.rs = 0;
+        std::array<double, 3> normal{};
+        bool anyPartial = false;
+        double surfaceLen = 0, surfaceRs = 0;
+        for (int s = 0; s < 4; ++s) {
+            const int c = edgeComp[s];
+            g.ec[s] = static_cast<std::uint8_t>(c);
+            g.eq[s] = edgeAt[s];
+            const int other = c == p ? q : p;
+            const int e3[3] = {static_cast<int>(edgeAt[s] / f.sx()), static_cast<int>((edgeAt[s] % f.sx()) / f.sy()), static_cast<int>(edgeAt[s] % f.sy())};
+            g.dualPerp[s] = f.dd[other][e3[other]];
+            g.stdWeight[s] = 1.0 / (c == p ? dq : dp);
+            // H -= ch ((E_q right - E_q left) / d_p - (E_p top - E_p bottom) / d_q)
+            g.sign[s] = s == 0 || s == 1 ? 1 : -1;
+            const double len = edgeLen[s];
+            std::vector<Interval> open; // along the edge, from its start
+            if (f.materials.isConductor(f.M(c)[edgeAt[s]]) && f.eActive(c, e3[0], e3[1], e3[2])) {
+                // Fully covered, and on the surface if it was recorded so.
+                if (const auto se = surfaceEdges_.find(edgeKey(c, edgeAt[s])); se != surfaceEdges_.end()) {
+                    surfaceLen += len;
+                    if (const auto rs = metalRs_.find(se->second); rs != metalRs_.end()) surfaceRs = rs->second;
+                }
+            } else if (const auto it = partial_.find(edgeKey(c, edgeAt[s])); it != partial_.end()) {
+                anyPartial = true;
+                double from = 0;
+                for (const auto& [lo, hi] : it->second.covered) {
+                    if (lo > from + kCutSnap * len) open.emplace_back(from, lo);
+                    from = std::max(from, hi);
+                }
+                if (from < len - kCutSnap * len) open.emplace_back(from, len);
+                for (int a = 0; a < 3; ++a) normal[a] += it->second.normal[a];
+                if (g.rs == 0) {
+                    const auto rs = metalRs_.find(it->second.owner);
+                    if (rs != metalRs_.end()) g.rs = rs->second;
+                }
+            } else {
+                open.emplace_back(0.0, len);
+            }
+            double free = 0;
+            for (const auto& [lo, hi] : open) free += hi - lo;
+            g.len[s] = f.eActive(c, e3[0], e3[1], e3[2]) ? free : 0.0; // E stays 0 on the PEC outer faces
+            // Walk counterclockwise: edges 2 and 3 run against their axes.
+            const bool reversed = s >= 2;
+            if (reversed) std::reverse(open.begin(), open.end());
+            for (const auto& [lo, hi] : open) {
+                const double a0 = reversed ? len - hi : lo, a1 = reversed ? len - lo : hi;
+                segs.push_back({x0[s] + dirX[s] * a0, y0[s] + dirY[s] * a0, x0[s] + dirX[s] * a1, y0[s] + dirY[s] * a1});
+            }
+        }
+        // Open area by the shoelace formula, with chords between open stretches.
+        double twice = 0, chord = 0;
+        for (std::size_t i = 0; i < segs.size(); ++i) {
+            const auto& a = segs[i];
+            const auto& b = segs[(i + 1) % segs.size()];
+            twice += a[0] * a[3] - a[2] * a[1] + a[2] * b[1] - b[0] * a[3];
+            chord += std::hypot(b[0] - a[2], b[1] - a[3]);
+        }
+        g.area = 0.5 * std::abs(twice);
+        g.chord = chord;
+        if (!anyPartial) {
+            // No cut in this face: the surface runs along its metal edges. Full area, chords along them.
+            if (segs.empty() || surfaceLen == 0) continue;
+            g.area = dp * dq;
+            g.chord = surfaceLen;
+            g.rs = surfaceRs;
+        }
+        // kappa: the surface's tangent across the chord, projected on the face normal. H of the
+        // face is that tangential H times kappa, so E_s = R_s H / kappa (exact loss per surface area).
+        const double nn = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+        const double nh = nn > 0 ? normal[h] / nn : 0.0;
+        g.kappa = std::clamp(std::sqrt(std::max(0.0, 1.0 - nh * nh)), 0.2, 1.0);
+        geoms.push_back(g);
+    }
+
+    const double dt = f.dt();
+    const double chBulk = static_cast<double>(static_cast<float>(dt / MU0));
+    auto build = [&](double beta) {
+        long long capped = 0;
+        f.cutFaces.clear();
+        f.cutFaces.reserve(geoms.size());
+        for (const Geom& g : geoms) {
+            CutFace cf{};
+            cf.hc = g.hc;
+            cf.hq = g.hq;
+            for (int s = 0; s < 4; ++s) {
+                cf.ec[s] = g.ec[s];
+                cf.eq[s] = g.eq[s];
+            }
+            double load = 0;
+            for (int s = 0; s < 4; ++s) load += g.len[s] / g.dualPerp[s];
+            const double areaFull = g.stdWeight[0] > 0 ? 1.0 / (g.stdWeight[0] * g.stdWeight[1]) : 0.0;
+            const bool open = g.area > 1e-6 * areaFull;
+            double gain = 1.0;
+            if (open) {
+                const double m = dt * dt * C0 * C0 * load / g.area;
+                if (m > beta) {
+                    gain = beta / m;
+                    ++capped;
+                }
+            }
+            const double alpha = open ? gain * dt * g.rs * g.chord / (2.0 * MU0 * g.area * g.kappa) : 0.0;
+            const double cah = (1.0 - alpha) / (1.0 + alpha);
+            const double cbh = open ? (dt / MU0) * gain / (g.area * (1.0 + alpha)) : 0.0;
+            cf.c[0] = static_cast<float>(open ? cah : 1.0);
+            for (int s = 0; s < 4; ++s) {
+                const double std_ = chBulk * g.stdWeight[s];
+                cf.c[s + 1] = static_cast<float>(g.sign[s] * ((open ? cah : 1.0) * std_ - cbh * g.len[s]));
+            }
+            f.cutFaces.push_back(cf);
+        }
+        return capped;
+    };
+    double beta = 3.0, lambda = 0;
+    long long capped = 0;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        capped = build(beta);
+        lambda = updateEigenvalue();
+        if (lambda <= kStableEigenvalue) break;
+        beta *= 0.85;
+    }
+    report_.cutFaces = static_cast<long long>(f.cutFaces.size());
+    report_.cappedFaces = capped;
+    report_.stabilityEigenvalue = lambda;
+    if (lambda > kStableEigenvalue)
+        diag("CONFORMAL_UNSTABLE", "error", "the conformal update could not be made stable on this grid (eigenvalue " + std::to_string(lambda) + "); turn off conformal conductors or change the mesh");
+    diag("CONFORMAL", "info", std::to_string(report_.cutFaces) + " faces cut by conductors use their true open area; " + std::to_string(capped) + " small ones are capped to keep the time step");
+}
+
+// Largest eigenvalue of dt^2 M, with M the E-to-E operator of one time step, by power
+// iteration from random values on the cut faces' edges (the modes that can break the
+// limit live there). Leapfrog is stable while it stays below 4. Leaves the fields at 0.
+double Solver::updateEigenvalue() {
+    YeeFields& f = *f_;
+    for (int c = 0; c < 3; ++c) std::fill(f.E(c).begin(), f.E(c).end(), 0.0f);
+    std::uint32_t seed = 12345;
+    for (const CutFace& cf : f.cutFaces)
+        for (int s = 0; s < 4; ++s) {
+            seed = seed * 1664525u + 1013904223u;
+            f.E(cf.ec[s])[cf.eq[s]] = (seed >> 16) & 1u ? 1.0f : -1.0f;
+        }
+    auto norm = [&]() {
+        double sum = 0;
+        for (int c = 0; c < 3; ++c)
+            for (float v : f.E(c)) sum += static_cast<double>(v) * v;
+        return std::sqrt(sum);
+    };
+    double nx = norm(), lambda = 0;
+    for (int iter = 0; iter < 120 && nx > 0; ++iter) {
+        for (int c = 0; c < 3; ++c) std::fill(f.H(c).begin(), f.H(c).end(), 0.0f);
+        f.updateH(*pool_);
+        for (int c = 0; c < 3; ++c) std::fill(f.E(c).begin(), f.E(c).end(), 0.0f);
+        f.updateE(*pool_);
+        const double ny = norm();
+        lambda = ny / nx;
+        if (!(ny > 0)) break;
+        const float scale = static_cast<float>(1.0 / ny);
+        for (int c = 0; c < 3; ++c)
+            for (float& v : f.E(c)) v *= scale;
+        nx = norm();
+    }
+    for (int c = 0; c < 3; ++c) {
+        std::fill(f.E(c).begin(), f.E(c).end(), 0.0f);
+        std::fill(f.H(c).begin(), f.H(c).end(), 0.0f);
+    }
+    return lambda;
+}
+
 void Solver::checkDcPath() {
     // Union-find over grid nodes joined by PEC edges; the port's reference and
     // signal ends are DC-connected if they share a component.
@@ -706,7 +1163,6 @@ void Solver::checkDcPath() {
         return x;
     };
     for (int c = 0; c < 3; ++c) {
-        const auto& m = f.M(c);
         const std::size_t st = f.stride(c);
         for (int i = 0; i <= f.nx(); ++i)
             for (int j = 0; j <= f.ny(); ++j)
@@ -714,7 +1170,7 @@ void Solver::checkDcPath() {
                     const int ijk[3] = {i, j, k};
                     if (ijk[c] >= f.n(c)) continue;
                     const std::size_t at = f.idx(i, j, k);
-                    if (!f.materials.isConductor(m[at])) continue;
+                    if (!inConductor(c, at)) continue;
                     const auto ra = find(static_cast<std::uint32_t>(at)), rb = find(static_cast<std::uint32_t>(at + st));
                     if (ra != rb) parent[ra] = rb;
                 }
@@ -736,7 +1192,7 @@ std::vector<float> Solver::pecSegments(std::size_t maxSegments) const {
             for (int j = 0; j <= f.ny(); ++j)
                 for (int k = 0; k <= f.nz(); ++k) {
                     const int ijk[3] = {i, j, k};
-                    if (ijk[c] < f.n(c) && f.materials.isConductor(f.M(c)[f.idx(i, j, k)])) ++total;
+                    if (ijk[c] < f.n(c) && inConductor(c, f.idx(i, j, k))) ++total;
                 }
     const std::size_t stepEvery = std::max<std::size_t>(1, (total + maxSegments - 1) / std::max<std::size_t>(maxSegments, 1));
     std::vector<float> out;
@@ -748,7 +1204,7 @@ std::vector<float> Solver::pecSegments(std::size_t maxSegments) const {
             for (int j = 0; j <= f.ny(); ++j)
                 for (int k = 0; k <= f.nz(); ++k) {
                     const int ijk[3] = {i, j, k};
-                    if (ijk[c] >= f.n(c) || !f.materials.isConductor(f.M(c)[f.idx(i, j, k)])) continue;
+                    if (ijk[c] >= f.n(c) || !inConductor(c, f.idx(i, j, k))) continue;
                     if (seen++ % stepEvery) continue;
                     double a0[3] = {g.x[i], g.y[j], g.z[k]}, a1[3] = {g.x[i], g.y[j], g.z[k]};
                     a1[c] = g.nodes(c)[ijk[c] + 1];
@@ -841,6 +1297,7 @@ void Solver::setupPort() {
                 const std::size_t at = f.idx(ijk[0], ijk[1], ijk[2]);
                 if (f.materials.isConductor(m[at]))
                     throw std::invalid_argument("port: a port edge lies inside a conductor, which would short the source");
+                partial_.erase(edgeKey(a, at));
                 const double eps = EPS0 * f.materials.epsR[m[at]];
                 lossyEdges += f.materials.sigma[m[at]] > 0;
                 const double len = f.d[a][ia];
@@ -871,7 +1328,7 @@ void Solver::setupPort() {
                     int e[3] = {ijk[0], ijk[1], ijk[2]};
                     e[c] += s;
                     if (e[c] < 0 || e[c] >= f.n(c) || e[0] > f.nx() || e[1] > f.ny() || e[2] > f.nz()) continue;
-                    if (f.materials.isConductor(f.M(c)[f.idx(e[0], e[1], e[2])])) return true;
+                    if (inConductor(c, f.idx(e[0], e[1], e[2]))) return true;
                 }
             }
         }
@@ -1026,6 +1483,7 @@ std::string Solver::gpuLayoutJson() const {
     j["materials"] = f.materials.size();
     j["pmc"] = f.pmcFaces();
     j["cells"] = f.grid().cellCount();
+    j["cutFaces"] = f.cutFaces.size();
     json slabs = json::array();
     for (const auto& s : cpml_->slabInfo())
         slabs.push_back({{"axis", s.axis}, {"lo", s.lo}, {"hi", s.hi}, {"nE", s.nE}, {"nH", s.nH}, {"planeE", s.planeE},
@@ -1057,6 +1515,12 @@ std::vector<float> Solver::gpuFloats(const std::string& name) const {
     if (name == "ca") return f.materials.ca;
     if (name == "cb") return f.materials.cb;
     if (name == "epsR") return toF(f.materials.epsR);
+    if (name == "cutCoef") {
+        std::vector<float> c;
+        c.reserve(5 * f.cutFaces.size());
+        for (const CutFace& cf : f.cutFaces) c.insert(c.end(), cf.c, cf.c + 5);
+        return c;
+    }
     if (name == "cpmlProfE") return cpml_->profiles(true);
     if (name == "cpmlProfH") return cpml_->profiles(false);
     if (name == "waveform") {
@@ -1076,6 +1540,16 @@ std::vector<float> Solver::gpuFloats(const std::string& name) const {
 }
 
 std::vector<std::uint32_t> Solver::gpuUints(const std::string& name) const {
+    if (name == "cutIdx") { // flat indices into E x y z, H x y z: H, then the four edges
+        const std::size_t nodes = f_->nodeCount();
+        std::vector<std::uint32_t> out;
+        out.reserve(5 * f_->cutFaces.size());
+        for (const CutFace& cf : f_->cutFaces) {
+            out.push_back(static_cast<std::uint32_t>((3u + cf.hc) * nodes + cf.hq));
+            for (int s = 0; s < 4; ++s) out.push_back(static_cast<std::uint32_t>(cf.ec[s] * nodes + cf.eq[s]));
+        }
+        return out;
+    }
     if (name != "mx" && name != "my" && name != "mz") throw std::invalid_argument("unknown GPU uint array '" + name + "'");
     const auto& m = f_->M(name[1] - 'x');
     std::vector<std::uint32_t> out((m.size() + 1) / 2, 0);
@@ -1266,6 +1740,7 @@ std::string meshReportJson(const MeshReport& m, const std::vector<Diagnostic>& d
     for (const auto& x : d) diags.push_back({{"code", x.code}, {"severity", x.severity}, {"message", x.message}});
     json j = {{"objects", objs}, {"overlaps", ov}, {"pecEdges", m.pecEdgesTotal}, {"minCell", m.minCell}, {"maxCell", m.maxCell}, {"diagnostics", diags}};
     j["dcConnected"] = m.dcConnected < 0 ? json(nullptr) : json(m.dcConnected == 1);
+    if (m.cutFaces > 0) j["conformal"] = {{"cutFaces", m.cutFaces}, {"cappedFaces", m.cappedFaces}, {"eigenvalue", m.stabilityEigenvalue}};
     return j.dump();
 }
 

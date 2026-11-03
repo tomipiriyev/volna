@@ -19,6 +19,7 @@ Variants:
                               cell size, a solid arm keeps its cross-section)
 """
 import json
+import math
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -102,6 +103,41 @@ def dipole_square(h=2.5, pml=8, pad=110.0):
     return x, x, z, objects, port, [0.95e9, 1.0e9]
 
 
+def dipole_round(h=2.5, pml=8, pad=110.0):
+    # Round metal arms of radius 3.7 mm, which fall between grid lines at every resolution
+    # (the conformal conductor case), same 2.5 mm gap. Conductivity 1e5 S/m makes the loss visible.
+    zt, zb, r = 75.0, -72.5, 3.7
+    fine = (math.ceil(r / h) + 2) * h  # a whole number of cells, so a grid line runs through the feed
+    x = axis_lines(-fine, fine, h, -pad, pad, pml)
+    z = axis_lines(zb - 2 * h, zt + 2 * h, h, zb - pad, zt + pad, pml)
+    objects = [
+        {"type": "cylinder", "material": "metal", "axis": "z", "center": [0, 0], "radius": r, "range": [zb, 0]},
+        {"type": "cylinder", "material": "metal", "axis": "z", "center": [0, 0], "radius": r, "range": [2.5, zt]},
+    ]
+    port = {"start": [0, 0, 0], "stop": [0, 0, 2.5], "axis": "z", "resistance": 50, "amplitude": 1}
+    return x, x, z, objects, port, [0.95e9, 1.0e9]
+
+
+def dipole_hat(h=2.5, pml=8, pad=110.0):
+    # Square-arm dipole with 40 x 40 x 5 mm metal top-hats, whose shape sets the resonance. On the
+    # grid here (the axis-aligned twin); the validation runner rotates the hats about the feed axis.
+    zt, zb, hat, w, tk, fine = 50.0, -47.5, 20.0, 2.5, 5.0, 32.5
+    x = axis_lines(-fine, fine, h, -(fine + pad - 30), fine + pad - 30, pml)
+    z = axis_lines(zb - tk - 2 * h, zt + tk + 2 * h, h, zb - tk - pad, zt + tk + pad, pml)
+    tris = [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7]
+    def plate(z0, z1):
+        pts = [c for zz in (z0, z1) for xy in ((-hat, -hat), (hat, -hat), (hat, hat), (-hat, hat)) for c in (*xy, zz)]
+        return {"type": "mesh", "material": "metal", "positions": pts, "indices": tris}
+    objects = [
+        {"type": "box", "material": "metal", "min": [-w, -w, zb], "max": [w, w, 0]},
+        {"type": "box", "material": "metal", "min": [-w, -w, 2.5], "max": [w, w, zt]},
+        plate(zt, zt + tk),
+        plate(zb - tk, zb),
+    ]
+    port = {"start": [0, 0, 0], "stop": [0, 0, 2.5], "axis": "z", "resistance": 50, "amplitude": 1}
+    return x, x, z, objects, port, [0.75e9, 0.85e9]
+
+
 def monopole(h=2.5, pml=8, pad=110.0):
     g = 150.0  # half side of the 300 mm ground sheet
     zt = 72.5
@@ -115,11 +151,11 @@ def monopole(h=2.5, pml=8, pad=110.0):
     return x, x, z, objects, port, [1.0e9]
 
 
-def write(name, parts, pml):
+def write(name, parts, pml, **extra):
     x, y, z, objects, port, ff = parts
     d = os.path.join(HERE, name)
     os.makedirs(d, exist_ok=True)
-    prob = base(name, x, y, z, pml, objects, port, ff)
+    prob = {**base(name, x, y, z, pml, objects, port, ff), **extra}
     with open(os.path.join(d, "problem.json"), "w") as fh:
         json.dump(prob, fh, indent=1)
     cells = (len(x) - 1) * (len(y) - 1) * (len(z) - 1)
@@ -131,4 +167,8 @@ write("dipole_pml16", dipole(pml=16), 16)
 write("dipole_pad2", dipole(pad=220.0), 8)
 for h, tag in ((2.5, "2.5"), (1.25, "1.25"), (2.5 / 3, "0.833")):
     write(f"dipole_sq_h{tag}", dipole_square(h=h), 8)
+for h, tag in ((2.5, "2.5"), (1.25, "1.25"), (2.5 / 3, "0.833")):
+    write(f"dipole_round_h{tag}", dipole_round(h=h), 8, conformal=True, materials=[{"name": "metal", "type": "metal", "conductivity": 1e5}])
+for h, tag in ((2.5, "2.5"), (1.25, "1.25")):
+    write(f"dipole_hat_h{tag}", dipole_hat(h=h), 8, materials=[{"name": "metal", "type": "metal", "conductivity": 1e5}])
 write("monopole", monopole(), 8)

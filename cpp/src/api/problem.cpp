@@ -235,6 +235,7 @@ Problem parseProblem(const std::string& text) {
         p.fMin = j.at("excitation").at("fMin").get<double>();
         p.fMax = j.at("excitation").at("fMax").get<double>();
         if (!(p.fMin > 0 && p.fMax > p.fMin)) fail("excitation", "needs 0 < fMin < fMax");
+        p.conformal = get(j, "conformal", false);
         p.metalLossFrequency = get(j, "metalLossFrequency", 0.0);
         if (!(p.metalLossFrequency >= 0)) fail("metalLossFrequency", "must be zero (band centre) or positive");
         p.portFrequencies = get(j, "portFrequencies", p.portFrequencies);

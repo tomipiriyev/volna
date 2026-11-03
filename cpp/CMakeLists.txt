@@ -108,6 +108,7 @@ if(NOT EMSCRIPTEN)
       tests/test_solver.cpp
       tests/test_voxelize.cpp
       tests/test_metal.cpp
+      tests/test_conformal.cpp
     )
     target_include_directories(antsim_tests PRIVATE ${CMAKE_BINARY_DIR}/_deps/doctest)
     target_include_directories(antsim_tests SYSTEM PRIVATE ${ANTSIM_DEPS}/nlohmann)

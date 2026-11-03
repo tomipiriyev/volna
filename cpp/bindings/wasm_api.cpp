@@ -106,11 +106,11 @@ public:
         });
     }
 
-    /// Float32Array (or Uint32Array for mx/my/mz) copy, or null with the error in lastError().
+    /// Float32Array (or Uint32Array for mx/my/mz/cutIdx) copy, or null with the error in lastError().
     val gpuArray(const std::string& name) {
         try {
             if (!solver_) throw std::invalid_argument("no problem prepared");
-            if (name == "mx" || name == "my" || name == "mz") {
+            if (name == "mx" || name == "my" || name == "mz" || name == "cutIdx") {
                 const auto v = solver_->gpuUints(name);
                 return val::global("Uint32Array").new_(typed_memory_view(v.size(), v.data()));
             }

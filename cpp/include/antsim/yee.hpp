@@ -34,6 +34,17 @@ struct EdgeMaterialTable {
     std::size_t size() const { return ca.size(); }
 };
 
+// A face cut by a conductor in conformal mode. Its H is corrected after the bulk
+// update: H <- c[0] H + sum(c[i + 1] E_i), which replaces the full cell lengths and
+// area of the bulk update by the open ones (Solver::buildCutFaces).
+struct CutFace {
+    std::size_t hq;      // node index of H
+    std::size_t eq[4];   // node indices of the four contour edges
+    float c[5];
+    std::uint8_t hc;     // H component
+    std::uint8_t ec[4];  // E components
+};
+
 // Yee-grid field storage (structure of arrays, float32). Every component uses
 // node-sized arrays (nx+1)*(ny+1)*(nz+1) with k contiguous, so neighbor
 // offsets are the same for all components; the few unused entries stay 0.
@@ -80,8 +91,9 @@ public:
     std::vector<float> ex, ey, ez, hx, hy, hz;
     std::vector<std::uint16_t> mx, my, mz; // material id per E edge
     EdgeMaterialTable materials;
+    std::vector<CutFace> cutFaces; // empty unless conductors cut grid faces
 
-    void updateH(ThreadPool& pool);
+    void updateH(ThreadPool& pool); // bulk kernel plus cut faces
     void updateE(ThreadPool& pool); // bulk kernel plus PMC face planes
 
     // Discrete electromagnetic energy 0.5*sum(eps |E|^2 dV + mu0 |H|^2 dV)
@@ -98,6 +110,7 @@ public:
     std::vector<double> d[3], dd[3];
 
 private:
+    void applyCutFaces(ThreadPool& pool);
     void updatePmcFaces();
     double energySlab(int i) const;
 

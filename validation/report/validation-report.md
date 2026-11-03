@@ -1,8 +1,8 @@
-# Validation report (M2–M4)
+# Validation report
 
-Generated 2026-10-26T02:25:16.546Z by `node validation/run_validation.mjs --rerun --wasm`.
+Generated 2026-11-03T06:30:15.198Z by `node validation/run_validation.mjs --wasm`.
 
-**65 / 65 checks passed.** Tolerances: `validation/tolerances.json`. Reference solver: openEMS 0.37 on identical grid lines.
+**76 / 76 checks passed.** Tolerances: `validation/tolerances.json`. Reference solver: openEMS 0.37 on identical grid lines.
 
 ## vs openEMS: dipole
 
@@ -57,6 +57,22 @@ Generated 2026-10-26T02:25:16.546Z by `node validation/run_validation.mjs --reru
 | finest pair Δf_res | 0.182 % | < 0.500 % | pass |
 | finest pair ΔD (0.95 GHz) | 0.004 dB | < 0.05 dB | pass |
 | observed convergence order of f_res | below 0.2 (monotone, slow) | info (PEC edges and the feed gap are field singularities, so convergence is slower than O(h²)) | info |
+
+## conformal conductors
+
+| Check | Value | Limit | Result |
+|---|---|---|---|
+| hats rotated 30° / 45°, h = 2.5 mm, f_res vs axis-aligned twin (0.6177 GHz): staircase -0.380 % / 1.699 %, conformal 0.752 % / 0.586 % | — | info | info |
+| hats rotated 30° / 45°, h = 1.25 mm, f_res vs axis-aligned twin (0.6148 GHz): staircase -0.286 % / -0.867 %, conformal 0.347 % / 0.295 % | — | info | info |
+| conformal: f_res difference between 30° and 45°, 2.5 mm cells | 0.166 % | < 0.400 % | pass |
+| conformal: f_res difference between 30° and 45°, 1.25 mm cells | 0.052 % | < 0.200 % | pass |
+| that difference, staircase / conformal (worse of the two grids) | 11.1 | > 3 | pass |
+| conformal: f_res vs twin at 45°, 1.25 mm cells | 0.295 % | < 0.500 % | pass |
+| conformal: that gap shrinks when the cell halves (ratio) | 1.99 | > 1.5 | pass |
+| conformal: radiation efficiency vs twin (0.75 GHz) | 0.00015 | < 0.001 | pass |
+| round dipole, h = 2.500 mm, f_res vs finest conformal: staircase 0.68 %, conformal 0.82 %; efficiency 0.9907 / 0.9912 | — | info | info |
+| round dipole, h = 1.250 mm, f_res vs finest conformal: staircase 0.42 %, conformal 0.31 %; efficiency 0.9906 / 0.9900 | — | info | info |
+| round dipole, h = 0.833 mm, f_res vs finest conformal: staircase 0.12 %, conformal 0.00 %; efficiency 0.9899 / 0.9897 | — | info | info |
 
 ## angular resolution
 
@@ -115,7 +131,7 @@ Generated 2026-10-26T02:25:16.546Z by `node validation/run_validation.mjs --reru
 
 | Check | Value | Limit | Result |
 |---|---|---|---|
-| dipole Zin, wasm ST (20.2 s, 3150 steps vs 3150) | 2.91e-15 | < 0.00001 | pass |
+| dipole Zin, wasm ST (33.0 s, 3150 steps vs 3150) | 2.91e-15 | < 0.00001 | pass |
 | D at 0.9500 GHz | 0.00e+0 | < 0.00001 dB | pass |
 | D at 1.0000 GHz | 4.44e-16 | < 0.00001 dB | pass |
 

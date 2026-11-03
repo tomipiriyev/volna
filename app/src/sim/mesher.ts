@@ -25,6 +25,8 @@ export interface MeshSettings {
   minSlabCells: number;
   feedGapCells: number;
   maxCells: number;
+  /** Curved or oblique conductors use conformal faces instead of staircases (docs/physics.md). */
+  conformal: boolean;
 }
 
 export const DEFAULT_MESH_SETTINGS: MeshSettings = {
@@ -36,6 +38,7 @@ export const DEFAULT_MESH_SETTINGS: MeshSettings = {
   minSlabCells: 3,
   feedGapCells: 2,
   maxCells: 8_000_000,
+  conformal: true,
 };
 
 export interface MeshBody {

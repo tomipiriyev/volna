@@ -3,6 +3,7 @@
   "dipolePhysics": { "lOverLambda": [0.46, 0.49], "rRes": [60, 75], "dTol": 0.15, "effTol": 0.02, "boxTol": 0.01 },
   "boundary": { "zinRel": 0.005, "dDb": 0.05 },
   "refinement": { "fResRel": 0.005, "dDb": 0.05 },
+  "conformal": { "spreadCoarse": 0.004, "spreadFine": 0.002, "minSpreadGain": 3, "gapFine": 0.005, "minShrink": 1.5, "effAbs": 0.001 },
   "angular": { "pRadDb": 0.01, "dDb": 0.05 },
   "wasm": { "zinRel": 1e-5, "dDb": 1e-5 },
   "patch": { "twinRel": 1e-9, "fResRel": 0.015, "zinRel": 0.05, "dDb": 0.3, "effAbs": 0.03 },

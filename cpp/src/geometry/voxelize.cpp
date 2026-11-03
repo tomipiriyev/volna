@@ -87,6 +87,13 @@ inline double edgeFn(double p0u, double p0v, double p1u, double p1v, double u, d
     return (p1u - p0u) * (v - p0v) - (p1v - p0v) * (u - p0u);
 }
 
+// edgeFn evaluated in one canonical direction: two triangles sharing an edge get exactly
+// opposite values, whatever the rounding, so a ray on the edge hits exactly one of them.
+inline double sharedEdgeFn(double p0u, double p0v, double p1u, double p1v, double u, double v) {
+    if (p0u < p1u || (p0u == p1u && p0v < p1v)) return edgeFn(p0u, p0v, p1u, p1v, u, v);
+    return -edgeFn(p1u, p1v, p0u, p0v, u, v);
+}
+
 inline bool topLeft(double p0u, double p0v, double p1u, double p1v) {
     const double dv = p1v - p0v, du = p1u - p0u;
     return dv < 0 || (dv == 0 && du < 0);
@@ -125,9 +132,9 @@ void AxisRayCaster::intervals(double u, double v, std::vector<Interval>& out) co
         const double* P0 = A;
         const double* P1 = S > 0 ? B : C;
         const double* P2 = S > 0 ? C : B;
-        const double w0 = edgeFn(P1[p_], P1[q_], P2[p_], P2[q_], u, v);
-        const double w1 = edgeFn(P2[p_], P2[q_], P0[p_], P0[q_], u, v);
-        const double w2 = edgeFn(P0[p_], P0[q_], P1[p_], P1[q_], u, v);
+        const double w0 = sharedEdgeFn(P1[p_], P1[q_], P2[p_], P2[q_], u, v);
+        const double w1 = sharedEdgeFn(P2[p_], P2[q_], P0[p_], P0[q_], u, v);
+        const double w2 = sharedEdgeFn(P0[p_], P0[q_], P1[p_], P1[q_], u, v);
         const bool in0 = w0 > 0 || (w0 == 0 && topLeft(P1[p_], P1[q_], P2[p_], P2[q_]));
         const bool in1 = w1 > 0 || (w1 == 0 && topLeft(P2[p_], P2[q_], P0[p_], P0[q_]));
         const bool in2 = w2 > 0 || (w2 == 0 && topLeft(P0[p_], P0[q_], P1[p_], P1[q_]));
@@ -153,6 +160,33 @@ void AxisRayCaster::intervals(double u, double v, std::vector<Interval>& out) co
         }
     }
     mergeIntervals(out);
+}
+
+bool AxisRayCaster::normalAt(double u, double v, double t, double n[3]) const {
+    const int iu = static_cast<int>(std::floor((u - u0_) / du_)), iv = static_cast<int>(std::floor((v - v0_) / dv_));
+    if (iu < 0 || iu >= nu_ || iv < 0 || iv >= nv_) return false;
+    const std::size_t bin = static_cast<std::size_t>(iu) * nv_ + iv;
+    double best = std::numeric_limits<double>::infinity();
+    for (std::uint32_t k = binStart_[bin]; k < binStart_[bin + 1]; ++k) {
+        const std::uint32_t tri = binTris_[k];
+        const double* A = &m_.p[3 * m_.idx[3 * tri]];
+        const double* B = &m_.p[3 * m_.idx[3 * tri + 1]];
+        const double* C = &m_.p[3 * m_.idx[3 * tri + 2]];
+        const double S = edgeFn(A[p_], A[q_], B[p_], B[q_], C[p_], C[q_]);
+        if (std::abs(S) <= areaEps_) continue;
+        const double w0 = edgeFn(B[p_], B[q_], C[p_], C[q_], u, v) / S;
+        const double w1 = edgeFn(C[p_], C[q_], A[p_], A[q_], u, v) / S;
+        const double w2 = 1.0 - w0 - w1;
+        if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+        const double d = std::abs(w0 * A[a_] + w1 * B[a_] + w2 * C[a_] - t);
+        if (d >= best) continue;
+        best = d;
+        const double e1[3] = {B[0] - A[0], B[1] - A[1], B[2] - A[2]}, e2[3] = {C[0] - A[0], C[1] - A[1], C[2] - A[2]};
+        const double c[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]};
+        const double len = sign_ * std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+        for (int a = 0; a < 3; ++a) n[a] = c[a] / len;
+    }
+    return std::isfinite(best);
 }
 
 void AxisRayCaster::inclusiveIntervals(double u, double v, double eps, std::vector<Interval>& out) const {

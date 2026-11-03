@@ -85,7 +85,7 @@ function ConductorFields({ bodyId, a, cls }: { bodyId: string; a: Assignment; cl
           Surface resistance {(1e3 * surfaceResistance(c.sigma, fFit)).toPrecision(3)} mΩ, skin depth {(1e6 * skinDepth(c.sigma, fFit)).toPrecision(3)} µm at{' '}
           {(fFit / 1e9).toFixed(3)} GHz (band centre). The loss is applied on the conductor's surface
           {cls?.type === 'wire' && `, using the wire's ${cls.round ? 'diameter' : 'perimeter-equivalent diameter'} of ${(2 * cls.lossRadius).toFixed(3)} mm`}
-          {cls?.type === 'solid' && cls.roundWire && `, calibrated to a round wire of ${(2 * cls.roundWire.radius).toFixed(3)} mm diameter`}.
+          {cls?.type === 'solid' && cls.roundWire && `, as a round wire of ${(2 * cls.roundWire.radius).toFixed(3)} mm diameter`}.
           {cls?.type === 'sheet' && ' The sheet is modelled with zero thickness, so the solver cannot tell which face carries the current: choose it above (one face gives twice the loss of both).'}
         </p>
       ) : (

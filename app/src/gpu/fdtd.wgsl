@@ -10,7 +10,7 @@
 //   IO   V[maxSteps] I[maxSteps] energy partials, DFT twiddles of the current step
 //   ACC  NF2FF DFT: chunk sums, Kahan totals, Kahan compensation (2*accL floats each)
 //   META run state at [0..8): step, done, terminatedBy (1 energy, 2 maxSteps), -,
-//        peak energy, energy dB, last energy (f32 bits); then slab, port, face and phase tables
+//        peak energy, energy dB, last energy (f32 bits); then slab, port, face, phase and cut-face tables
 //        (offsets in P). Once `done` is set every step kernel is a no-op, so the host can
 //        queue work ahead and the run still stops at the step the C++ loop would.
 // Group 1 holds per-dispatch parameters (CPML slab, NF2FF field kind) at a dynamic offset.
@@ -28,6 +28,7 @@ struct Params {
   psiEqO: u32, psiHpO: u32, psiHqO: u32, accL: u32,
   ioI: u32, ioPart: u32, nPart: u32, etaSq: f32,
   ioTw: u32, dt: f32, pulseEnd: f32, targetDb: f32,
+  nCut: u32, mCut: u32, oCut: u32, pad0: u32,
 }
 
 struct Dispatch { slab: u32, electric: u32, check: u32, pad1: u32 }
@@ -126,6 +127,17 @@ fn updateE(@builtin(global_invocation_id) g: vec3<u32>) {
       F[2u * N + q] = C[P.oCa + m] * F[2u * N + q] + C[P.oCb + m] * curl;
     }
   }
+}
+
+// Faces cut by conductors (YeeFields::applyCutFaces), after the bulk H update. META holds
+// the flat F indices of H and its four contour edges, C their five coefficients.
+@compute @workgroup_size(64, 1, 1)
+fn cutFaces(@builtin(global_invocation_id) g: vec3<u32>) {
+  if (g.x >= P.nCut || finished()) { return; }
+  let m = P.mCut + 5u * g.x;
+  let c = P.oCut + 5u * g.x;
+  let h = META[m];
+  F[h] = C[c] * F[h] + C[c + 1u] * F[META[m + 1u]] + C[c + 2u] * F[META[m + 2u]] + C[c + 3u] * F[META[m + 3u]] + C[c + 4u] * F[META[m + 4u]];
 }
 
 // ---------------------------------------------------------------- CPML (one slab per dispatch)

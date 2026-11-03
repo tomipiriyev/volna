@@ -91,6 +91,7 @@ struct Problem {
     PortSpec port;
     double fMin = 0, fMax = 0; // excitation band (Hz); Gaussian spectrum -20 dB at the edges
     double metalLossFrequency = 0; // Hz at which metal surface resistance is evaluated; 0 = sqrt(fMin fMax)
+    bool conformal = false; // conductors off the grid lines: conformal faces instead of staircases (docs/physics.md)
     int portFrequencies = 401;
     FarFieldSpec farField;
     double energyEndDb = -60.0; // -50 dB truncates band-edge spectra by ~1-2 % (validation report)

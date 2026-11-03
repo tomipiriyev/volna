@@ -78,6 +78,14 @@ per-dispatch parameters at a dynamic uniform offset.
 - **Energy** for termination is summed in f32 in units of ε₀·mm³. Only its
   ratio to the peak matters.
 
+## Conformal conductors
+
+The `cutFaces` kernel runs right after the bulk H update, as on the CPU: for each
+cut face, H ← c₀H + Σc_i E_i. `Solver::gpuUints("cutIdx")` gives the flat `F`
+indices of H and its four edges (stored in `META`), and `gpuFloats("cutCoef")` the
+five coefficients (stored in `C`). The self-test and the complete-run comparison
+include a conformal metal dipole.
+
 ## Measured (2026-10-26, Apple M1, Chrome new headless, Metal)
 
 The Solver tab's "GPU self-test" and "GPU vs CPU, complete runs" buttons

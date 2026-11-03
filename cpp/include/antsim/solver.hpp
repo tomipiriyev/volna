@@ -5,12 +5,15 @@
 #include "antsim/nf2ff.hpp"
 #include "antsim/problem.hpp"
 #include "antsim/threadpool.hpp"
+#include "antsim/voxelize.hpp"
 #include "antsim/yee.hpp"
 
 #include <complex>
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace antsim {
@@ -55,6 +58,10 @@ struct MeshReport {
     int dcConnected = -1;           // -1 unknown, 0 no, 1 yes (port terminals joined by conductors)
     long long pecEdgesTotal = 0;
     double minCell = 0, maxCell = 0; // m
+    // Conformal mode: faces cut by conductors, those capped for stability, and the
+    // largest eigenvalue of the update (stable below 4).
+    long long cutFaces = 0, cappedFaces = 0;
+    double stabilityEigenvalue = 0;
 };
 
 struct PortResult {
@@ -159,6 +166,20 @@ private:
         ObjectSpec o; // in metres
         int report;
     };
+    // Conformal mode: an edge partly inside a conductor stays active, with its covered
+    // stretches (metres from the edge's start), the sum of the surface's outward unit
+    // normals where the edge crosses it, and the conductor's tag.
+    struct PartialEdge {
+        std::vector<Interval> covered;
+        std::array<double, 3> normal{};
+        std::uint16_t owner = EdgeMaterialTable::kPec;
+    };
+    std::uint64_t edgeKey(int c, std::size_t at) const { return static_cast<std::uint64_t>(c) * f_->nodeCount() + at; }
+    bool inConductor(int c, std::size_t at) const; // conductor edge, or one at least half covered
+    void resolvePartialEdges();
+    void buildCutFaces();
+    double updateEigenvalue();
+
     void rasterize();
     void applyMetalLoss(const std::vector<MetalTag>& tags);
     void setupPort();
@@ -182,6 +203,12 @@ private:
     std::vector<std::string> warnings_;
     std::vector<Diagnostic> diags_;
     MeshReport report_;
+    std::unordered_map<std::uint64_t, PartialEdge> partial_;
+    std::map<std::uint16_t, double> metalRs_; // metal tag -> surface resistance (ohm)
+    // Conformal: metal conductor edges on the surface beside a cut cell -> their tag. Where the
+    // surface runs exactly along such an edge (a grid line tangent to a round body), its
+    // faces carry the loss, with the chord along the edge.
+    std::unordered_map<std::uint64_t, std::uint16_t> surfaceEdges_;
 
     struct PortEdge {
         std::size_t at;

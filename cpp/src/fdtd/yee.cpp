@@ -117,6 +117,20 @@ void YeeFields::updateH(ThreadPool& pool) {
             }
         }
     });
+    if (!cutFaces.empty()) applyCutFaces(pool);
+}
+
+void YeeFields::applyCutFaces(ThreadPool& pool) {
+    float* const E_[3] = {ex.data(), ey.data(), ez.data()};
+    float* const H_[3] = {hx.data(), hy.data(), hz.data()};
+    pool.run([&](int tid, int nt) {
+        const auto [a, b] = ThreadPool::range(0, static_cast<int>(cutFaces.size()), tid, nt);
+        for (int n = a; n < b; ++n) {
+            const CutFace& f = cutFaces[n];
+            float& h = H_[f.hc][f.hq];
+            h = f.c[0] * h + f.c[1] * E_[f.ec[0]][f.eq[0]] + f.c[2] * E_[f.ec[1]][f.eq[1]] + f.c[3] * E_[f.ec[2]][f.eq[2]] + f.c[4] * E_[f.ec[3]][f.eq[3]];
+        }
+    });
 }
 
 bool YeeFields::eActive(int c, int i, int j, int k) const {

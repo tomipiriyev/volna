@@ -30,6 +30,8 @@ export interface MeshReport {
   minCell: number;
   maxCell: number;
   dcConnected: boolean | null;
+  /** Conformal mode only: faces cut by conductors, those capped for stability, the update's largest eigenvalue. */
+  conformal?: { cutFaces: number; cappedFaces: number; eigenvalue: number };
   diagnostics: SolverDiagnostic[];
 }
 

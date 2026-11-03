@@ -142,21 +142,6 @@ export function computeDiagnostics(s: ProjectSnapshot): DiagnosticsResult {
       });
   }
 
-  // Metal loss on curved surfaces: the staircase adds corners where current crowds.
-  for (const b of model.bodies) {
-    const a = assignments[b.id];
-    const cls = classes[b.id];
-    if (!a || !isConductor(a.role) || a.conductor?.kind !== 'metal' || cls?.type !== 'solid' || cls.roundWire) continue;
-    if (b.faces.some((f) => !f.planar || f.axisAligned === null))
-      out.push({
-        code: 'METAL_CURVED',
-        severity: 'warning',
-        message: `"${b.name}" has curved or oblique faces. On the grid they become staircases whose corners concentrate the current, so its conductor loss can be overstated by up to about 70% (straight round wires are calibrated and exact).`,
-        fix: 'Treat its conductor loss as an upper bound, or approximate the part with axis-aligned faces.',
-        bodyIds: [b.id],
-      });
-  }
-
   // Metal loss: the surface resistance is evaluated at the band centre.
   if (Object.values(assignments).some((a) => isConductor(a.role) && a.conductor?.kind === 'metal')) {
     const v = metalBandValidity(freq.fMin, freq.fMax);
