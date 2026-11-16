@@ -243,3 +243,34 @@ describe.skipIf(!hasCli)('STEP pipeline vs programmatic geometry (native solver)
     expect(loss(r) / sine).toBeLessThan(2);
   }, 600_000);
 });
+
+describe('thin wires from STEP', () => {
+  it('a dipole with tilted round arms becomes two thin wires fed at their ends, and runs', async () => {
+    const m = await loadFixture('dipole_tilted.step');
+    const top = bodyByName(m, 'arm_top'), bottom = bodyByName(m, 'arm_bottom');
+    const assignments: Record<string, Assignment> = { [top.id]: { role: 'radiator', priority: 0 }, [bottom.id]: { role: 'radiator', priority: 0 } };
+    const port: PortDef = { signal: bodyRef(top), reference: bodyRef(bottom), axis: 2, lateral: [0, 0], anchor: 0, z0: 50, amplitude: 1 };
+    const s = snapshotFor(m, assignments, port, { fMin: 1.5e9, fMax: 3.5e9, farField: [], cellsPerWavelength: 20 });
+    expect(blockingIssues(s)).toEqual([]);
+    const plan = buildSimulation(s, simBodies(m));
+    const wires = (plan.problem.objects as { type: string; points: number[]; radius: number }[]).filter((o) => o.type === 'wire');
+    expect(wires).toHaveLength(2);
+    const p = plan.problem.port as { start: Vec3; stop: Vec3 };
+    expect(p.start[2]).toBeCloseTo(-0.5, 3);
+    expect(p.stop[2]).toBeCloseTo(0.5, 3);
+    for (const w of wires) {
+      expect(w.radius).toBeCloseTo(1, 2);
+      // One end is the feed point; the other, 29 mm along an arm tilted 30 degrees, is 14.5 mm off the axis.
+      const ends = [w.points.slice(0, 3), w.points.slice(-3)];
+      const atFeed = ends.findIndex((e) => [p.start, p.stop].some((q) => e.every((v, k) => v === q[k])));
+      expect(atFeed).toBeGreaterThanOrEqual(0);
+      expect(Math.abs(ends[1 - atFeed][0])).toBeCloseTo(14.5, 1);
+    }
+    if (!hasCli) return;
+    Object.assign(plan.problem, { portFrequencies: 81, termination: { energyDb: -40, maxSteps: 20000 } });
+    const r = runCli(plan.problem);
+    expect(r.run.terminatedBy).toBe('energy');
+    expect(r.mesh.wires.segments).toBeGreaterThan(10);
+    expect(Math.min(...r.port.zinRe)).toBeGreaterThan(0);
+  }, 120_000);
+});

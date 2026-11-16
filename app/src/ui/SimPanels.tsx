@@ -247,6 +247,15 @@ export function ValidatePanel({ caps }: { caps: Capabilities | null }) {
                   </td>
                 </tr>
               )}
+              {v.info.report.wires && (
+                <tr>
+                  <td>Thin wires</td>
+                  <td data-testid="wires-report">
+                    {v.info.report.wires.segments.toLocaleString()} segments
+                    {v.info.report.wires.clamped > 0 ? `, ${v.info.report.wires.clamped.toLocaleString()} thicker than the grid's own line (see warning)` : ''} · CPU only
+                  </td>
+                </tr>
+              )}
               <tr>
                 <td>Signal–reference DC path</td>
                 <td>{v.info.report.dcConnected === null ? '—' : v.info.report.dcConnected ? 'connected (see warning)' : 'none'}</td>
@@ -329,6 +338,11 @@ export function SimulatePanel({ caps }: { caps: Capabilities | null }) {
           <p className="small muted">
             The GPU runs the same update equations in single precision and matches the CPU solver to about 1e-6 (Solver tab → GPU self-test). Setup and
             post-processing stay on the CPU.
+          </p>
+        )}
+        {sim.backend === 'webgpu' && hasThinWires(sim.validation?.plan.problem) && (
+          <p className="small warn" data-testid="sim-wires-cpu">
+            This project has thin wires, which the WebGPU backend does not implement: run it on the CPU.
           </p>
         )}
         <div className="row">
@@ -441,4 +455,10 @@ function LatestRun({ result, current }: { result: SimResult; current: boolean })
       </button>
     </section>
   );
+}
+
+/** Whether a problem has thin-wire objects (CPU only). */
+function hasThinWires(problem: Record<string, unknown> | undefined): boolean {
+  const objects = problem?.objects;
+  return Array.isArray(objects) && objects.some((o) => (o as { type?: string }).type === 'wire');
 }

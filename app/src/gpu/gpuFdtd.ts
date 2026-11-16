@@ -30,6 +30,8 @@ export interface GpuLayout {
   cells: number;
   /** Faces cut by conductors in conformal mode (arrays cutIdx, cutCoef). */
   cutFaces: number;
+  /** Thin-wire segments (CPU only). */
+  wires?: number;
   cpml: { axis: number; lo: number; hi: number; nE: number; nH: number; planeE: number; profE: number; profH: number; psiE: number; psiH: number }[];
   port: { axis: number; edges: { at: number; length: number; source: number; line: number }[]; lines: { ijk: [number, number, number]; area: number; weight: number }[] } | null;
   nf2ff: { freqs: number[]; faces: { a: number; side: number; plane: number; B0: number; B1: number; C0: number; C1: number; nb: number; nc: number; offEp: number; offHq: number; offEq: number; offHp: number }[] } | null;
@@ -266,6 +268,7 @@ export class GpuFdtd {
   /** Uploads the problem and compiles the kernels. Rejects (with the WGSL/validation message) if anything fails. */
   static async create(device: GPUDevice, layout: GpuLayout, arrays: GpuArrays): Promise<GpuFdtd> {
     if (layout.pmc.some(Boolean)) throw new GpuError('GPU_UNSUPPORTED', 'PMC boundaries are not implemented on the GPU backend');
+    if (layout.wires) throw new GpuError('GPU_UNSUPPORTED', 'thin wires are not implemented on the GPU backend; run this project on the CPU');
     device.pushErrorScope('validation');
     device.pushErrorScope('out-of-memory');
     let g: GpuFdtd;

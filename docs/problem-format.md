@@ -25,7 +25,9 @@ malformed JSON with a message that names the field.
       "thickness": 0.035, "currentFaces": 1,    // metal sheets only
       "positions": ..., "indices": ... },
     { "type": "box", "material": "copper", "min": [0,0,0], "max": [0,0,30], "radius": 0.5 },   // metal wire
-    { "type": "mesh", "material": "copper", "wire": { "axis": 2, "radius": 0.45 }, "positions": ..., "indices": ... }
+    { "type": "mesh", "material": "copper", "wire": { "axis": 2, "radius": 0.45 }, "positions": ..., "indices": ... },
+    { "type": "wire", "material": "pec" | "<metal>", "name": "coil", "radius": 0.4,
+      "points": [x,y,z, x,y,z, ...] }       // thin wire along a polyline (any angle), see below
   ],
   "port": { "start": [x,y,z], "stop": [x,y,z], "axis": "z", "resistance": 50, "amplitude": 1 },
   "excitation": { "fMin": 0.5e9, "fMax": 1.5e9 },
@@ -65,6 +67,19 @@ malformed JSON with a message that names the field.
 - **Far field.** Needs CPML on all six faces. The NF2FF box sits
   `marginCells` inside the PML on every face and must not intersect the
   structure.
+
+## Thin wires
+
+A `wire` object is a round wire of `radius` along the polyline `points`, modelled as a
+chain of thin-wire segments about one local cell long (docs/physics.md, "Thin wires").
+It is not voxelized; it couples to the grid through its in-cell inductance and
+capacitance. Ends that coincide (within 0.1% of the smallest cell) are joined. A port
+whose start or stop meets a wire end drives the wire there. Such a port must lie on a
+grid line and span whole edges along its axis, and a side with no wire is grounded.
+A free end next to a conductor edge is grounded. With a metal material, the wire's
+resistance per length is included. Problems with wires run at Courant 0.8 or below,
+and the WebGPU backend refuses them. The mesh report carries
+`"wires": {"segments", "clamped", "minLogR0OverA", "eigenvalue"}`.
 
 ## Triangle-mesh objects (M3)
 

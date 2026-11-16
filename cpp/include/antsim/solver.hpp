@@ -62,6 +62,10 @@ struct MeshReport {
     // largest eigenvalue of the update (stable below 4).
     long long cutFaces = 0, cappedFaces = 0;
     double stabilityEigenvalue = 0;
+    // Thin wires: segments, those whose in-cell inductance was raised for stability or
+    // because the wire is not thin next to the local cells, and the smallest ln(r0 / a).
+    long long wireSegments = 0, wireClamped = 0;
+    double wireMinLog = 0;
 };
 
 struct PortResult {
@@ -180,6 +184,35 @@ private:
     void buildCutFaces();
     double updateEigenvalue();
 
+    // Thin wires (docs/physics.md): a current per segment (half steps) and a charge per
+    // node (whole steps), coupled to E by one set of interpolation weights.
+    struct WireSegment {
+        int a = -1, b = -1;   // node indices
+        double len = 0;       // m
+        double logR0 = 0;     // ln(r0 / a) of the grid's own representation
+        double L = 0;         // in-cell inductance (H/m)
+        double R = 0;         // resistance (ohm): the segment's metal loss, or the source's
+        bool source = false;  // the port's delta gap
+        std::uint32_t c0 = 0, c1 = 0; // range in wireCouple_
+        double ca = 1, cb = 0; // I <- ca I + cb (sum(w E) - dphi + Vs)
+        double cb0 = 0;        // cb without the resistance (the lossless update the stability check uses)
+    };
+    struct WireCouple {
+        std::size_t q;  // E node index
+        float w;        // length weight times direction (m)
+        float dep;      // cb_E / dual volume, for the deposit
+        std::uint8_t c; // E component
+    };
+    struct WireNode {
+        double invC = 0;      // 1 / (C' l~), V per C
+        bool grounded = false;
+    };
+    void buildWires();
+    void wireCurrent(long long n, bool drive);
+    void wireDeposit();
+    void wireCharge();
+    bool hasWires() const { return !wireSeg_.empty(); }
+
     void rasterize();
     void applyMetalLoss(const std::vector<MetalTag>& tags);
     void setupPort();
@@ -209,6 +242,11 @@ private:
     // surface runs exactly along such an edge (a grid line tangent to a round body), its
     // faces carry the loss, with the chord along the edge.
     std::unordered_map<std::uint64_t, std::uint16_t> surfaceEdges_;
+    std::vector<WireSegment> wireSeg_;
+    std::vector<WireCouple> wireCouple_;
+    std::vector<WireNode> wireNode_;
+    std::vector<double> wireI_, wireQ_;
+    int wirePortSeg_ = -1; // the source segment when the port drives a wire
 
     struct PortEdge {
         std::size_t at;

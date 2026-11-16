@@ -109,7 +109,9 @@ Solver::Solver(const Problem& p) : p_(p) {
     pool_ = std::make_unique<ThreadPool>(threads);
     std::array<bool, 6> pmc{};
     for (int i = 0; i < 6; ++i) pmc[i] = p.boundaries[i] == Boundary::Pmc;
-    f_ = std::make_unique<YeeFields>(toMetres(p.grid, p.unit), p.courant);
+    // Thin wires couple to the grid like cut faces do, so they get the same headroom.
+    const bool wires = std::any_of(p.objects.begin(), p.objects.end(), [](const ObjectSpec& o) { return o.kind == ObjectSpec::Kind::Wire; });
+    f_ = std::make_unique<YeeFields>(toMetres(p.grid, p.unit), wires ? std::min(p.courant, kConformalCourant) : p.courant);
     f_->setPmcFaces(pmc);
     rasterize();
     if (!partial_.empty() && p.courant > kConformalCourant) {
@@ -124,10 +126,27 @@ Solver::Solver(const Problem& p) : p_(p) {
         f_->setPmcFaces(pmc);
         rasterize();
     }
-    if (p.hasPort) {
+    // A port whose end meets a wire's end drives the wire (a delta gap in the wire); others are grid ports.
+    bool wirePort = false;
+    if (p.hasPort)
+        for (const ObjectSpec& o : p.objects) {
+            if (o.kind != ObjectSpec::Kind::Wire) continue;
+            const std::size_t m = o.positions.size();
+            for (std::size_t at : {std::size_t{0}, m - 3}) {
+                double ds = 0, dsStart = 0;
+                for (int a = 0; a < 3; ++a) {
+                    ds += (o.positions[at + a] - p.port.stop[a]) * (o.positions[at + a] - p.port.stop[a]);
+                    dsStart += (o.positions[at + a] - p.port.start[a]) * (o.positions[at + a] - p.port.start[a]);
+                }
+                const double tolDrawing = 1e-3 * minSpacingAll(p.grid) + 1e-9 / p.unit;
+                wirePort |= std::sqrt(std::min(ds, dsStart)) < tolDrawing;
+            }
+        }
+    if (p.hasPort && !wirePort) {
         setupPort();
         checkDcPath();
     }
+    if (wires) buildWires();
     if (!partial_.empty()) buildCutFaces();
     cpml_ = std::make_unique<Cpml>(*f_, p.boundaries, p.pml);
     setupFarField();
@@ -187,9 +206,10 @@ void Solver::rasterize() {
             o.positions.clear();
             o.indices.clear();
         }
-        static const char* kinds[] = {"box", "cylinder", "mesh", "sheet"};
+        static const char* kinds[] = {"box", "cylinder", "mesh", "sheet", "wire"};
         report_.objects.push_back({o.name.empty() ? std::string(kinds[static_cast<int>(o.kind)]) + " " + std::to_string(ob.report + 1) : o.name,
                                    kinds[static_cast<int>(o.kind)], o.material, 0, 0, 0});
+        if (o.kind == ObjectSpec::Kind::Wire) continue; // on the grid only through Solver::buildWires
         objs.push_back(std::move(ob));
     }
     std::stable_sort(objs.begin(), objs.end(), [](const Obj& a, const Obj& b) { return a.o.priority < b.o.priority; });
@@ -200,6 +220,8 @@ void Solver::rasterize() {
     };
     auto isConductor = [&](const ObjectSpec& o) { return o.material == "pec" || metalOf(o) != nullptr; };
     for (auto& ob : objs) report_.objects[ob.report].conductor = isConductor(ob.o);
+    for (auto& r : report_.objects)
+        if (r.kind == "wire") r.conductor = true;
 
     // 1. Dielectrics: material per cell (by cell centre), then area-weighted averages on edges.
     const bool anyDielectric = std::any_of(objs.begin(), objs.end(), [&](const Obj& o) { return !isConductor(o.o); });
@@ -552,6 +574,7 @@ void Solver::rasterize() {
         report_.pecEdgesTotal += marked;
     }
     for (const auto& r : report_.objects) {
+        if (r.kind == "wire") continue;
         if ((r.conductor && r.pecEdges == 0) || (!r.conductor && r.cells == 0))
             diag("OBJECT_EMPTY", "warning", "\"" + r.name + "\" produced no " + (r.conductor ? "conductor edges" : "dielectric cells") +
                                                  " on this grid (smaller than a cell, or fully covered by another object)");
@@ -1115,36 +1138,56 @@ void Solver::buildCutFaces() {
 double Solver::updateEigenvalue() {
     YeeFields& f = *f_;
     for (int c = 0; c < 3; ++c) std::fill(f.E(c).begin(), f.E(c).end(), 0.0f);
+    std::fill(wireQ_.begin(), wireQ_.end(), 0.0);
     std::uint32_t seed = 12345;
+    auto coin = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return (seed >> 16) & 1u ? 1.0f : -1.0f;
+    };
     for (const CutFace& cf : f.cutFaces)
-        for (int s = 0; s < 4; ++s) {
-            seed = seed * 1664525u + 1013904223u;
-            f.E(cf.ec[s])[cf.eq[s]] = (seed >> 16) & 1u ? 1.0f : -1.0f;
-        }
+        for (int s = 0; s < 4; ++s) f.E(cf.ec[s])[cf.eq[s]] = coin();
+    for (const WireCouple& wc : wireCouple_) f.E(wc.c)[wc.q] = coin();
+    // Wire charges enter the norm as the field they make over a cell, q invC / l~ (V/m).
+    std::vector<double> qScale(wireQ_.size(), 0.0);
+    for (const WireSegment& w : wireSeg_)
+        for (int end : {w.a, w.b}) qScale[end] = std::max(qScale[end], wireNode_[end].invC / w.len);
+    for (std::size_t i = 0; i < wireQ_.size(); ++i)
+        if (!wireNode_[i].grounded) wireQ_[i] = coin() / qScale[i];
     auto norm = [&]() {
         double sum = 0;
         for (int c = 0; c < 3; ++c)
             for (float v : f.E(c)) sum += static_cast<double>(v) * v;
+        for (std::size_t i = 0; i < wireQ_.size(); ++i) sum += wireQ_[i] * qScale[i] * wireQ_[i] * qScale[i];
         return std::sqrt(sum);
     };
     double nx = norm(), lambda = 0;
     for (int iter = 0; iter < 120 && nx > 0; ++iter) {
         for (int c = 0; c < 3; ++c) std::fill(f.H(c).begin(), f.H(c).end(), 0.0f);
+        std::fill(wireI_.begin(), wireI_.end(), 0.0);
         f.updateH(*pool_);
+        if (hasWires()) wireCurrent(0, false);
         for (int c = 0; c < 3; ++c) std::fill(f.E(c).begin(), f.E(c).end(), 0.0f);
+        std::fill(wireQ_.begin(), wireQ_.end(), 0.0);
         f.updateE(*pool_);
+        if (hasWires()) {
+            wireDeposit();
+            wireCharge();
+        }
         const double ny = norm();
         lambda = ny / nx;
         if (!(ny > 0)) break;
         const float scale = static_cast<float>(1.0 / ny);
         for (int c = 0; c < 3; ++c)
             for (float& v : f.E(c)) v *= scale;
+        for (double& q : wireQ_) q /= ny;
         nx = norm();
     }
     for (int c = 0; c < 3; ++c) {
         std::fill(f.E(c).begin(), f.E(c).end(), 0.0f);
         std::fill(f.H(c).begin(), f.H(c).end(), 0.0f);
     }
+    std::fill(wireI_.begin(), wireI_.end(), 0.0);
+    std::fill(wireQ_.begin(), wireQ_.end(), 0.0);
     return lambda;
 }
 
@@ -1404,12 +1447,17 @@ RunState Solver::step(long long maxChunk) {
         const long long n = state_.step;
         f.updateH(pool);
         cpml_->correctH(pool);
-        if (p_.hasPort) recordCurrent();
+        if (p_.hasPort && wirePortSeg_ < 0) recordCurrent();
         if (nf2ff_) nf2ff_->accumulateH(n, pool);
+        if (hasWires()) wireCurrent(n, true);
 
         f.updateE(pool);
         cpml_->correctE(pool);
-        if (p_.hasPort) {
+        if (hasWires()) {
+            wireDeposit();
+            wireCharge();
+        }
+        if (p_.hasPort && wirePortSeg_ < 0) {
             const float g = static_cast<float>(pulse_((n + 0.5) * dt));
             for (const auto& pe : portEdges_) ea[pe.at] += pe.source * g;
             recordVoltage();
@@ -1484,6 +1532,7 @@ std::string Solver::gpuLayoutJson() const {
     j["pmc"] = f.pmcFaces();
     j["cells"] = f.grid().cellCount();
     j["cutFaces"] = f.cutFaces.size();
+    j["wires"] = wireSeg_.size(); // thin wires run on the CPU only
     json slabs = json::array();
     for (const auto& s : cpml_->slabInfo())
         slabs.push_back({{"axis", s.axis}, {"lo", s.lo}, {"hi", s.hi}, {"nE", s.nE}, {"nH", s.nH}, {"planeE", s.planeE},
@@ -1587,6 +1636,12 @@ void Solver::releaseTimeLoopStorage() {
 std::vector<double> Solver::nf2ffAccumulators() const { return nf2ff_ ? nf2ff_->exportAcc() : std::vector<double>{}; }
 
 Results Solver::finish() {
+    // The wire port records V(n dt) at step n >= 1; the last value, at N dt, needs I^{N+1/2},
+    // so it is completed with I^{N-1/2}.
+    if (wirePortSeg_ >= 0 && vSeries_.size() + 1 == iSeries_.size()) {
+        const WireSegment& w = wireSeg_[wirePortSeg_];
+        vSeries_.push_back(p_.port.amplitude * pulse_(static_cast<double>(iSeries_.size()) * f_->dt()) - w.R * iSeries_.back());
+    }
     Results r;
     r.run = state_;
     r.backend = backend_;
@@ -1741,6 +1796,7 @@ std::string meshReportJson(const MeshReport& m, const std::vector<Diagnostic>& d
     json j = {{"objects", objs}, {"overlaps", ov}, {"pecEdges", m.pecEdgesTotal}, {"minCell", m.minCell}, {"maxCell", m.maxCell}, {"diagnostics", diags}};
     j["dcConnected"] = m.dcConnected < 0 ? json(nullptr) : json(m.dcConnected == 1);
     if (m.cutFaces > 0) j["conformal"] = {{"cutFaces", m.cutFaces}, {"cappedFaces", m.cappedFaces}, {"eigenvalue", m.stabilityEigenvalue}};
+    if (m.wireSegments > 0) j["wires"] = {{"segments", m.wireSegments}, {"clamped", m.wireClamped}, {"minLogR0OverA", m.wireMinLog}, {"eigenvalue", m.stabilityEigenvalue}};
     return j.dump();
 }
 

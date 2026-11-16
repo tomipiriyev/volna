@@ -3,8 +3,9 @@
 // computes the real grid, and the problem builder re-checks thin conductors
 // against the local cells there.
 import { boxSize } from './geometry';
-import type { Axis, CadBody, FrequencySettings, Material, Role } from './types';
+import type { Axis, CadBody, FrequencySettings, Material, Role, Vec3 } from './types';
 import { CONDUCTOR_ROLES } from './types';
+import { wirePath } from './wirePath';
 
 const C0 = 299792458;
 
@@ -27,6 +28,14 @@ export type GeomClass =
   | { type: 'wire'; axis: Axis; diameter: number; lossRadius: number; round: boolean }
   /** Thin axis-aligned dielectric layer: the mesher refines across it. */
   | { type: 'slab'; axis: Axis; thickness: number }
+  /** Thin round wire along a bent or oblique path: a chain of thin-wire segments (true mm). */
+  | { type: 'curvedWire'; radius: number; length: number; points: Vec3[] }
+  /**
+   * Dielectric smaller than a cell: voxelized at cell centres (it fills only the cells whose
+   * centre it contains, often none) and does not refine the grid; left out if its surface is
+   * not closed (it cannot be voxelized).
+   */
+  | { type: 'subcell'; voxelized: boolean }
   | { type: 'unsupported'; reason: string; fix: string };
 
 /** Minimum cells the mesher places across a thin dielectric layer. */
@@ -40,11 +49,16 @@ export const MIN_SLAB_CELLS = 3;
  *   Thinner than a cell: an axis-aligned conductor plate becomes a sheet and
  *   an axis-aligned wire becomes a line of PEC edges. An axis-aligned
  *   dielectric plate is a slab the mesher refines across (the estimate is the
- *   background cell, not the local one). Anything else is unsupported.
+ *   background cell, not the local one). A round conductor wire along any
+ *   other path becomes a thin-wire chain (curvedWire). Any other dielectric
+ *   is sub-cell (voxelized at cell centres); any other conductor is unsupported.
  */
 export function classifyBody(body: CadBody, scale: number, cellMm: number, role?: Role): GeomClass {
   const size = boxSize(body.bbox).map((s) => s * scale);
   const topo = body.topology;
+  const smallDielectric = role === 'dielectric' && Math.max(...size) < 2 * cellMm;
+  if (smallDielectric && (!topo.closed || topo.nonManifoldEdges > 0 || topo.inconsistentEdges > 0 || !(topo.volume! > 0)))
+    return { type: 'subcell', voxelized: false };
   if (!topo.closed) {
     const axes = new Set(body.faces.map((f) => f.axisAligned));
     const flat = body.faces.length > 0 && body.faces.every((f) => f.planar) && axes.size === 1 && !axes.has(null);
@@ -85,7 +99,7 @@ export function classifyBody(body: CadBody, scale: number, cellMm: number, role?
     const axis = thin.indexOf(false) as Axis;
     const diameter = 2 * t;
     const lossRadius = perimeterAlong(axis) > 0 ? perimeterAlong(axis) / (2 * Math.PI) : diameter / 2;
-    if (diameter < cellMm) return { type: 'wire', axis, diameter, lossRadius, round: roundWire !== undefined };
+    if (diameter < cellMm) return role === 'dielectric' ? { type: 'subcell', voxelized: true } : { type: 'wire', axis, diameter, lossRadius, round: roundWire !== undefined };
     return { type: 'solid', thicknessCells: diameter / cellMm, marginal: diameter < 2 * cellMm, ...wireTag };
   }
   if (t >= 2 * cellMm) return { type: 'solid', thicknessCells: t / cellMm, marginal: false, ...wireTag };
@@ -102,6 +116,11 @@ export function classifyBody(body: CadBody, scale: number, cellMm: number, role?
     }
   }
   if (t >= cellMm) return { type: 'solid', thicknessCells: t / cellMm, marginal: t < 2 * cellMm, ...wireTag };
+  if (role === 'dielectric') return { type: 'subcell', voxelized: true };
+  // A round wire along a bent or oblique path (a swept circle): a thin-wire chain.
+  const path = wirePath(body);
+  if (path)
+    return { type: 'curvedWire', radius: path.radius * scale, length: path.length * scale, points: path.points.map((p) => p.map((v) => v * scale) as Vec3) };
   return {
     type: 'unsupported',
     reason: `Feature thinner than one cell (${t.toFixed(3)} mm vs ~${cellMm.toFixed(3)} mm) that is not an axis-aligned sheet or wire.`,

@@ -1,5 +1,38 @@
 # Changelog
 
+## Thin wires on any path (2026-11-17)
+
+### Added
+- **Thin wires at any angle and along curved paths** (`"type": "wire"` objects):
+  a chain of segments with its own current and charge, coupled to the grid with
+  energy- and charge-conserving weights, and the wire's true radius entering through
+  an in-cell inductance and capacitance (docs/physics.md, "Thin wires"). Metal wires
+  include their resistance. A port at a wire's end drives it through a delta gap.
+  CPU only: the WebGPU backend refuses such problems with a message.
+- **Round wires bent or tilted off the axes in STEP files** (coils, helices,
+  tilted whips) are recognised. Their centreline and radius are recovered from the
+  tessellation, so they become thin wires instead of `THIN_FEATURE_UNSUPPORTED`.
+  The mesher caps cells near them at 8 wire radii. A feed on the wire snaps to its
+  end.
+- **Sub-cell dielectric bodies** (SMD parts and similar) are voxelized at cell
+  centres, or left out if their surface is defective, with one
+  `SUBCELL_DIELECTRIC` warning. Before, they were blocking errors.
+- Tests: `cpp/tests/test_wires.cpp` (angle invariance of a dipole, small-loop
+  inductance against theory, stability) and app unit tests for path extraction,
+  classification, the feed and the mesher.
+
+### Changed
+- The mesher merges fixed lines closer than 5% of the local cell, such as the
+  outlines of a board and its ground plane a few µm apart, which made µm-sized cells.
+  The feed's lines always survive.
+
+### Known limitations
+- The thin-wire model has not been checked against NEC or openEMS yet.
+- Near a feed in fine cells, the wire can be thicker than the grid's own line
+  radius; its in-cell term is then held at a minimum (`WIRE_THICK`), and that part
+  acts slightly thinner than it is.
+- A feed on a thin wire must be at the wire's end and span whole grid edges.
+
 ## Conformal conductors (2026-11-03)
 
 ### Added
