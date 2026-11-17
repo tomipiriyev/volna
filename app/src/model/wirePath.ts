@@ -7,8 +7,9 @@
 //    centroids are the wire's ends.
 // 2. Every vertex on the side surface, moved inward along its normal by r, lies on the axis.
 // 3. Those axis points are ordered by their distance from the first cap measured over the
-//    side surface (Dijkstra on the welded mesh), averaged in bins of about 2r, and joined
-//    with the cap centroids into a polyline.
+//    side surface (Dijkstra on the welded mesh), averaged in bins of 2r, and joined with the
+//    cap centroids into a polyline; then re-binned twice, in bins of r, by the arc length of
+//    each axis point's projection onto that path (fine enough for bends of a few r).
 // 4. r is re-measured as the mean distance of the side vertices from that polyline and the
 //    path recomputed once. The result is accepted only if every side vertex lies within
 //    r +- 25 % of the path and the path's length matches the volume (V / pi r^2) to 10 %.
@@ -178,9 +179,8 @@ function extract(body: CadBody): WirePath | null {
   // Axis points binned by a parameter along the wire: first the surface distance, then (in
   // bends, where the inside and outside of the tube differ in length) the arc length of each
   // axis point's projection onto the previous path.
-  const build = (radius: number, param: Float64Array): Vec3[] => {
+  const build = (radius: number, param: Float64Array, bin: number): Vec3[] => {
     const span = Math.max(...sideIds.map((w) => param[w]));
-    const bin = 2 * radius;
     const nb = Math.max(1, Math.ceil(span / bin));
     const acc = Array.from({ length: nb }, () => [0, 0, 0, 0]);
     for (const w of sideIds) {
@@ -208,9 +208,9 @@ function extract(body: CadBody): WirePath | null {
   const refine = (radius: number, path: Vec3[]) => {
     const param = new Float64Array(nW);
     for (const w of sideIds) param[w] = arcOfProjection(axisPoint(w, radius), path);
-    return build(radius, param);
+    return build(radius, param, radius);
   };
-  let points = build(r, dist);
+  let points = build(r, dist, 2 * r);
   for (let pass = 0; pass < 2; pass++) points = refine(r, points);
   let sum = 0;
   for (const w of sideIds) sum += distanceToPath(wpos[w], points);

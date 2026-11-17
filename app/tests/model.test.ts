@@ -309,9 +309,9 @@ describe('project file', () => {
 });
 
 describe('thin wires along bent paths', () => {
-  // A small coil antenna: a 6 mm vertical lead, a 2 mm-radius bend, then 1.2 turns of
+  // A small coil antenna: a 6 mm vertical lead, a 1.2 mm-radius bend (3 wire radii), then 1.2 turns of
   // a helix of radius 10 mm and pitch 8 mm; wire radius 0.4 mm. Parametrised by arc length.
-  const lead = 6, bend = 2, R = 10, pitch = 8, turns = 1.2;
+  const lead = 6, bend = 1.2, R = 10, pitch = 8, turns = 1.2;
   const arc = (Math.PI / 2) * bend, turn = Math.hypot(2 * Math.PI * R, pitch);
   const pathLength = lead + arc + turns * turn;
   const helix = (t: number): Vec3 => {
