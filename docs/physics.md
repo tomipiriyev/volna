@@ -133,7 +133,91 @@ and feed gap rather than its surface shape, conformal faces change f_res little
 There the gain is the surface loss, not the resonance.
 
 Not conformal: dielectrics (still whole cells), zero-thickness sheets (outlines
-staircased to whole edges) and thin-wire lines.
+staircased to whole edges) and axis-aligned thin-wire lines.
+
+## Thin wires
+
+A round wire much thinner than the cells, along any path (`"type": "wire"` objects;
+from STEP, a round wire bent or tilted off the axes), is a chain of straight
+segments with a current I per segment and a charge q per node
+(`cpp/src/api/wires.cpp`). The grid carries the field; the wire adds what the grid
+cannot resolve, the field between its surface and the grid's own picture of a line
+current:
+
+    (L' l) dI/dt = Σ_e w_e E_e − (φ_b − φ_a) [+ V_s − R I],   φ = q / (C' l̃)
+    dq/dt = (current in) − (current out)
+    ε dE_e/dt = (∇×H)_e − w_e I / V_e
+
+with L' = μ/(2π)·ln(r0/a) and 1/C' = ln(r0/a)/(2πε). Here a is the wire radius, l
+the segment length, l̃ the length a node stands for, ε the mean permittivity of the
+edges it touches, and r0 the grid's own effective radius.
+
+- **Coupling weights w_e.** E_c is taken as constant along its own axis within a
+  cell and bilinear across it. Each segment is cut where it crosses grid planes, and
+  each piece gets the exact integral of that interpolation along it: the bilinear
+  weight at the piece's midpoint plus a slope term ±Δu·Δv/12 (Villasenor-Buneman).
+  The same weights carry the field to the wire and the current to the grid, so the
+  exchange conserves energy. They also conserve charge: the grid divergence of the
+  deposited current is exactly the change of the wire's node charges spread
+  trilinearly. An earlier version sampled three points per segment. It left stray
+  charge wherever a tilted wire crossed a cell wall, and a dipole tilted 30° resonated
+  more than 40% too high.
+- **r0** is the radius at which the grid's field of a line current, spread and read
+  back with these weights, matches the true one. A static solve of the discrete 2-D
+  Laplacian gives r0 = 0.199 h on a grid line and 0.718 h at a cell centre
+  (tabulated against the offset in the cell). Segments average ln(r0/a) along
+  their length.
+- **Thin enough.** The model needs a < r0. Where ln(r0/a) falls below 0.2, the
+  in-cell term is held at 0.2 and `WIRE_THICK` reports how many segments. Such a
+  wire then acts thinner than it is.
+- **Feed.** A port whose end meets a wire's end drives the wire through a source
+  segment from start to stop (a delta gap). It carries V_s and the port resistance,
+  semi-implicitly, and records I and V = V_s − R·Ī like the grid port. The gap must
+  span whole grid edges along its axis, on a grid line. A sub-cell gap between
+  nodes shares its edges with the wire segments next to it, which then hold the
+  field there near zero and short the source out. The solver rejects such a feed.
+  A port end with no wire is grounded (the reference conductor).
+- **Ends.** Wire ends that meet are joined. A free end next to a conductor edge on
+  the grid is grounded (φ = 0, its charge flows into the conductor); other free ends
+  keep their charge, so the current goes to zero there.
+- **Metal loss.** A metal wire gets R = R'·l per segment, with R' the round wire's
+  resistance per length (the Bessel-function form in "Conductor loss", at the loss
+  fit frequency), applied semi-implicitly.
+- **Stability.** Problems with wires run at Courant 0.8. At setup the update's
+  largest eigenvalue is measured, with the wires in the operator; their
+  resistances are left out, since resistance only damps but would hide how
+  strongly a segment couples. If it exceeds 3.98, the floor on ln(r0/a) is raised
+  ×1.5 and the eigenvalue measured again. Raising the floor makes the affected
+  segments act slightly thinner, and `WIRE_STABILITY` reports how many there are.
+  At Courant 0.8 a wire adds about 1.3/ln(r0/a) to the eigenvalue, so the floor
+  rises only for wires close to the grid's own radius.
+- **CPU only.** The WebGPU backend refuses problems with wires.
+
+Checks (`cpp/tests/test_wires.cpp`). Dipole: arms 70 mm, a = 0.2 mm, a one-cell
+2.5 mm gap along z, 2.5 mm cells. Loop: radius b = 20 mm in a vertical plane, fed
+the same way, graded cells.
+
+| Case | Result |
+|---|---|
+| Dipole, aligned on a grid line | f_res 0.998 GHz, R 72.0 Ω (L/λ = 0.474) |
+| Dipole, arms tilted 30° | f_res +0.12%, R −0.8% |
+| Dipole, arms tilted 45° at azimuth 30° | f_res −0.11%, R −2.7% |
+| Loop, low-frequency L vs μ0·b·(ln(8b/a) − 2) | +2.1% at azimuth 0° and at 30° |
+
+In the tilted dipoles the feed gap stays along z, so the arms kink slightly at the
+feed. That kink accounts for part of the change in R.
+
+**Grid convergence is slow.** The checks above each use one grid. Refining the cells
+around a wire moves its resonance down, roughly first-order. On a vertical
+monopole (a = 0.2 mm, about 0.31λ long, on a small board with a lumped feed),
+capping the cells near it at 3.2, 1.6 and 0.8 mm gave f_res 867.2, 850.2 and
+840.5 MHz: −2.0%, then −1.1%. The limit extrapolates to roughly 4% below the
+3.2 mm value. A horizontal-coil antenna of the same length moved −0.8% for one
+halving. The likely causes are the r0 calibration, which assumes locally uniform
+transverse cells, and the end and feed regions. Until this is improved, check
+convergence (lower "Cells near thin wires" on the Mesh step, `wireCellRadii`), and
+expect absolute resonances to be a few per cent high on coarse grids. Comparisons
+between designs on the same grid are much tighter.
 
 ## Conductor loss (metals)
 

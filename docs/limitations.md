@@ -50,10 +50,34 @@ approximately. Each milestone updates it.
   zero-thickness PEC sheets. They snap to a feed end, then to an existing
   grid line, then to their mid-plane, and the snap distance is reported.
   The sheet outline is staircased to whole edges.
-- **Thin wires** are single lines of PEC edges on the wire axis. Their
+- **Thin axis-aligned wires** are single lines of PEC edges on the wire axis. Their
   effective radius follows the cell size, not the CAD radius.
-- **Thin oblique or curved features**, and open surfaces that are not flat
-  and axis-aligned, are rejected.
+- **Thin round wires on any other path** (bent, coiled or tilted; Ø below about
+  two cells) are thin-wire chains with their true radius (physics.md, "Thin
+  wires"). The centreline and radius come from the tessellation: two flat end caps
+  of area about πr² are required, and the result must fit the surface to ±25% of r
+  and match the volume to 10%, or the body stays unsupported. Measured errors: a
+  dipole's resonance moves by up to 0.12% with its angle to the grid, and its
+  resistance by up to 2.7%. A small loop's inductance is 2.1% above the thin-ring
+  formula. Refining the grid lowers the resonance, roughly first-order: −2.0%
+  and then −1.1% per halving of the cells near a vertical monopole, and about 4% in
+  the extrapolated limit. Treat absolute resonances on coarse grids as a few per
+  cent high, and check convergence. No comparison against NEC or openEMS has been
+  made yet. The model
+  assumes the wire is thinner than the grid's own line radius, 0.2–0.7 cell. Where
+  it is not, typically next to a feed on a grid line in fine cells, the in-cell
+  term is held at a minimum (`WIRE_THICK`), and those segments act thinner than
+  they are. A feed on a wire must sit at one of the wire's ends and span whole
+  grid edges. Wires run on the CPU only.
+- **Thin oblique or curved conductors that are not round wires** (tilted plates,
+  thin-walled shells), and open surfaces that are not flat and axis-aligned, are
+  rejected.
+- **Sub-cell dielectrics** (dielectric bodies thinner than a cell that are not
+  axis-aligned layers, such as SMD parts) are voxelized at cell centres, so each
+  fills only the cells whose centre it contains, often none. They do not refine
+  the grid. Small ones with open or defective surfaces are left out. One
+  `SUBCELL_DIELECTRIC` warning lists them all; exclude them, or refine the mesh if
+  they matter.
 - **Overlaps.** Dielectric overlaps are confirmed cell by cell in the
   solver; equal priorities are an error. Conductors always win over
   dielectrics, and touching conductors are joined.
@@ -74,6 +98,14 @@ approximately. Each milestone updates it.
   geometric grading. Refinement regions cover dielectrics (λ/√εr), thin
   slabs (3 cells), the feed (2 cells across the gap, ±2 cells laterally)
   and conductor solids (2 cells). Region edges also become fixed lines.
+  Around thin wires on bent or oblique paths, cells are capped at 8 wire radii
+  ("Cells near thin wires" on the Mesh step), and those region edges are not fixed
+  lines. Fewer radii refine there, but below about 5 the wire becomes thicker than
+  the grid's own line and is clamped (`WIRE_THICK`). A feed on a thin
+  wire gets no lateral refinement.
+- Fixed lines closer than 5% of the local cell are merged (nearly coincident CAD
+  faces, such as a board outline and its ground plane a few µm apart); the feed's
+  own lines always survive. A gap narrower than that between two conductors closes.
 - The smallest cell sets the time step for the whole domain, so very thin
   gaps or slabs make runs long. The mesher notes cells below 1/50 of the
   background cell.
@@ -83,7 +115,8 @@ approximately. Each milestone updates it.
 ## Feed
 
 - Single port, axis-aligned only. Terminals are derived by casting the feed
-  line through the bodies.
+  line through the bodies. On a thin wire (bent or oblique), the feed snaps onto
+  the wire's nearest end and drives the wire there.
 - DC paths between the terminals are found on the voxelized grid (Validate
   step). They are a warning, not an error, because folded dipoles, loops
   and PIFAs have one on purpose.

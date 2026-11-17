@@ -23,7 +23,7 @@ export interface SimulationPlan {
 export interface MeshPlan {
   mesh: MeshResult;
   classes: Map<string, GeomClass>;
-  feed: { axis: Axis; start: Vec3; end: Vec3 };
+  feed: { axis: Axis; start: Vec3; end: Vec3; wire?: boolean };
   diagnostics: Diagnostic[];
   settings: MeshSettings;
 }
@@ -65,6 +65,11 @@ function cellsAcross(lines: number[], lo: number, hi: number): number {
   return n ? (hi - lo) / (len / n) : 0;
 }
 
+/** Sub-cell dielectrics that cannot be voxelized are left out of the grid. */
+const leftOut = (c: GeomClass | undefined) => c?.type === 'subcell' && !c.voxelized;
+
+const dist3 = (a: Vec3, b: Vec3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
 /** A body the grid lines cannot follow: it has curved or oblique faces. */
 const offGrid = (b: CadBody) => b.faces.some((f) => !f.planar || f.axisAligned === null);
 
@@ -97,7 +102,7 @@ export function planMesh(s: ProjectSnapshot, meshSettings: MeshSettings = DEFAUL
   const port = s.port!;
   const diagnostics: Diagnostic[] = [];
 
-  const active = s.model.bodies.filter((b) => s.assignments[b.id] && s.assignments[b.id].role !== 'excluded');
+  const active = s.model.bodies.filter((b) => s.assignments[b.id] && s.assignments[b.id].role !== 'excluded' && !leftOut(diag.classes[b.id]));
   const classes = new Map<string, GeomClass>(active.map((b) => [b.id, diag.classes[b.id]]));
   const scaleBox = (b: { min: Vec3; max: Vec3 }) => ({ min: b.min.map((v) => v * scale) as Vec3, max: b.max.map((v) => v * scale) as Vec3 });
   const meshBodies: MeshBody[] = active.map((b) => {
@@ -118,6 +123,26 @@ export function planMesh(s: ProjectSnapshot, meshSettings: MeshSettings = DEFAUL
         diagnostics.push({ code: 'FEED_SNAPPED_TO_WIRE', severity: 'info', message: `The feed line was moved ${Math.abs(center - feed.start[o]).toFixed(3)} mm onto the axis of wire "${meshBodies.find((m) => m.id === id)!.name}".` });
       feed.start[o] = feed.end[o] = center;
     }
+  }
+
+  // A thin-wire terminal: the feed meets the wire at one of its ends, and the gap joins the
+  // wire there (the solver drives the wire through it). Snap the feed onto that end.
+  for (const [id, side] of [[port.signal.bodyId, 'end'], [port.reference.bodyId, 'start']] as const) {
+    const c = classes.get(id);
+    if (c?.type !== 'curvedWire') continue;
+    feed.wire = true;
+    const tip = feed[side];
+    const ends = [c.points[0], c.points[c.points.length - 1]];
+    const e = dist3(ends[0], tip) <= dist3(ends[1], tip) ? ends[0] : ends[1];
+    const name = meshBodies.find((m) => m.id === id)!.name;
+    if (dist3(e, tip) > 2 * c.radius + 1e-6) {
+      diagnostics.push({ code: 'WIRE_FEED_NOT_AT_END', severity: 'error', message: `The feed meets wire "${name}" ${dist3(e, tip).toFixed(3)} mm from its nearest end; a feed on a thin wire must be at one of the wire's ends.`, fix: 'Move the feed line onto the end of the wire.', bodyIds: [id] });
+      continue;
+    }
+    const moved = dist3(e, tip);
+    for (const o of [0, 1, 2].filter((x) => x !== port.axis)) feed.start[o] = feed.end[o] = e[o];
+    feed[side][port.axis] = e[port.axis];
+    if (moved > 1e-6) diagnostics.push({ code: 'FEED_SNAPPED_TO_WIRE', severity: 'info', message: `The feed was moved ${moved.toFixed(3)} mm onto the end of wire "${name}".` });
   }
 
   const meshIt = () => {
@@ -180,7 +205,7 @@ export function buildSimulation(
   const diagnostics = [...plan.diagnostics];
   const scale = unitScale(s.units);
   const port = s.port!;
-  const active = s.model.bodies.filter((b) => s.assignments[b.id] && s.assignments[b.id].role !== 'excluded');
+  const active = s.model.bodies.filter((b) => s.assignments[b.id] && s.assignments[b.id].role !== 'excluded' && classes.has(b.id));
 
   // Materials and objects. Metal conductors become "metal" materials (one per
   // name and conductivity); PEC conductors use the reserved "pec".
@@ -216,7 +241,13 @@ export function buildSimulation(
     }
     const material = conductorMaterial(a);
     const metal = material !== 'pec';
-    if (cls.type === 'wire') {
+    if (cls.type === 'curvedWire') {
+      // A chain of thin-wire segments; the end at the feed is the feed point itself, so the solver joins them.
+      const pts = cls.points.map((p) => [...p] as Vec3);
+      for (const k of [0, pts.length - 1])
+        for (const q of [feed.start, feed.end]) if (feed.wire && dist3(pts[k], q) <= 2 * cls.radius + 1e-6) pts[k] = [...q] as Vec3;
+      objects.push({ type: 'wire', name: b.name, material, radius: cls.radius, points: pts.flat() });
+    } else if (cls.type === 'wire') {
       const w = mesh.wires[b.id];
       const lo: Vec3 = [0, 0, 0], hi: Vec3 = [0, 0, 0];
       const [u, v] = [0, 1, 2].filter((x) => x !== w.axis);

@@ -20,6 +20,10 @@ layers.
 | Voxelizer: tessellated sphere dielectric volume error falls with the grid (0.47% at 16³, 0.003% at 32³) | Cell-centre dielectric sampling |
 | Voxelizer: a rectangular sheet mesh equals the zero-thickness box; a disc footprint stays inside its circle | Sheet footprint rule |
 | Voxelizer: equal-priority dielectric overlap is an error, priorities resolve it; DC path, loop and floating port detected | Overlap and feed checks |
+| Thin wires: a fed dipole tilted off the axes runs stably and stops on energy | Wire stability check, delta-gap feed |
+| Thin wires: dipole tilted 30° and 45° vs aligned, f_res within 1% (measured 0.12%), R within 3% (measured 2.7%) | Oblique coupling weights, charge conservation |
+| Thin wires: small circular loop, low-frequency L within 3% of μ0·b·(ln(8b/a) − 2) (measured +2.1%, at two azimuths) | In-cell inductance on a curved path |
+| App (`app/tests/model.test.ts`): centreline of a tessellated helix with lead and bend within 0.05 mm of the path, radius to 1%; sub-cell dielectrics a warning; feed snapped to the wire end on grid lines; nearly coincident grid lines merged, feed lines kept | Wire path extraction, classification, feed, mesher |
 
 ## 2. Solver cross-check and physics (`node validation/run_validation.mjs`)
 

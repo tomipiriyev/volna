@@ -60,25 +60,29 @@ export function computeDiagnostics(s: ProjectSnapshot): DiagnosticsResult {
     out.push({ code: 'FREQ_INVALID', severity: 'error', message: 'The frequency band is invalid (need 0 < f_min < f_max).' });
 
   // Per-body geometry and assignment checks.
+  const subcell: { voxelized: string[]; dropped: string[] } = { voxelized: [], dropped: [] };
   for (const b of model.bodies) {
     const cls = classifyBody(b, scale, cellMm, roleOf(b.id));
     classes[b.id] = cls;
     const role = roleOf(b.id);
     const t = b.topology;
     const ids = [b.id];
+    // A sub-cell dielectric that cannot be voxelized is left out, so its surface defects do not block the run.
+    const dropped = cls.type === 'subcell' && !cls.voxelized;
+    const blocking = (id: string) => active(id) && !dropped;
     if (role === undefined)
       out.push({ code: 'UNASSIGNED', severity: 'warning', message: `"${b.name}" has no electromagnetic role.`, fix: 'Assign a role or mark it excluded.', bodyIds: ids });
     if (t.nonManifoldEdges > 0)
-      out.push({ code: 'NON_MANIFOLD', severity: active(b.id) ? 'error' : 'warning', message: `"${b.name}" has ${t.nonManifoldEdges} non-manifold edge(s) in its tessellation.`, fix: 'Repair the body in CAD.', bodyIds: ids });
+      out.push({ code: 'NON_MANIFOLD', severity: blocking(b.id) ? 'error' : 'warning', message: `"${b.name}" has ${t.nonManifoldEdges} non-manifold edge(s) in its tessellation.`, fix: 'Repair the body in CAD.', bodyIds: ids });
     if (t.inconsistentEdges > 0)
-      out.push({ code: 'INCONSISTENT_ORIENTATION', severity: active(b.id) ? 'error' : 'warning', message: `"${b.name}" has inconsistently oriented faces (${t.inconsistentEdges} edges).`, fix: 'Repair the body in CAD.', bodyIds: ids });
+      out.push({ code: 'INCONSISTENT_ORIENTATION', severity: blocking(b.id) ? 'error' : 'warning', message: `"${b.name}" has inconsistently oriented faces (${t.inconsistentEdges} edges).`, fix: 'Repair the body in CAD.', bodyIds: ids });
     if (t.degenerateTriangles > 0)
       out.push({ code: 'DEGENERATE_TRIANGLES', severity: 'info', message: `"${b.name}" has ${t.degenerateTriangles} degenerate triangle(s) in its tessellation.`, bodyIds: ids });
     if (t.closed && t.volume !== null && t.volume < 0)
-      out.push({ code: 'INVERTED_SOLID', severity: active(b.id) ? 'error' : 'warning', message: `"${b.name}" is inside out (negative enclosed volume).`, fix: 'Reverse the solid orientation in CAD.', bodyIds: ids });
+      out.push({ code: 'INVERTED_SOLID', severity: blocking(b.id) ? 'error' : 'warning', message: `"${b.name}" is inside out (negative enclosed volume).`, fix: 'Reverse the solid orientation in CAD.', bodyIds: ids });
 
     const maxDim = Math.max(...boxSize(b.bbox)) * scale;
-    if (maxDim < cellMm && cls.type !== 'unsupported')
+    if (maxDim < cellMm && cls.type !== 'unsupported' && cls.type !== 'subcell')
       out.push({ code: 'BELOW_RESOLUTION', severity: active(b.id) ? 'warning' : 'info', message: `"${b.name}" (${maxDim.toFixed(3)} mm) is smaller than one estimated cell (~${cellMm.toFixed(3)} mm).`, bodyIds: ids });
 
     switch (cls.type) {
@@ -107,6 +111,17 @@ export function computeDiagnostics(s: ProjectSnapshot): DiagnosticsResult {
           out.push({ code: 'THIN_WIRE', severity: active(b.id) ? 'warning' : 'info', message: `"${b.name}" (Ø ${cls.diameter.toFixed(3)} mm) is thinner than a cell along ${'xyz'[cls.axis]}; it becomes a line of PEC edges whose effective radius is a fraction of the cell, not the CAD radius.`, fix: 'Refine the mesh for an accurate input impedance.', bodyIds: ids });
         else out.push({ code: 'THIN_DIELECTRIC', severity: 'error', message: `"${b.name}" is too thin to be a dielectric on this grid.`, bodyIds: ids });
         break;
+      case 'curvedWire':
+        out.push({
+          code: 'THIN_WIRE_PATH',
+          severity: 'info',
+          message: `"${b.name}" is a round wire (Ø ${(2 * cls.radius).toFixed(3)} mm, ${cls.length.toFixed(1)} mm long) along a bent or oblique path. It is modelled as a thin wire with its true radius (docs/physics.md, "Thin wires"); thin wires run on the CPU solver only.`,
+          bodyIds: ids,
+        });
+        break;
+      case 'subcell':
+        if (active(b.id)) (cls.voxelized ? subcell.voxelized : subcell.dropped).push(b.id);
+        break;
       case 'slab':
         out.push({
           code: 'THIN_DIELECTRIC_LAYER',
@@ -126,6 +141,20 @@ export function computeDiagnostics(s: ProjectSnapshot): DiagnosticsResult {
       const m = materials.find((x) => x.id === a.materialId);
       if (!m) out.push({ code: 'DIELECTRIC_NO_MATERIAL', severity: 'error', message: `Dielectric "${b.name}" has no material.`, fix: 'Choose a material.', bodyIds: ids });
     }
+  }
+
+  if (subcell.voxelized.length + subcell.dropped.length > 0) {
+    const n = subcell.voxelized.length + subcell.dropped.length;
+    out.push({
+      code: 'SUBCELL_DIELECTRIC',
+      severity: 'warning',
+      message:
+        `${n} dielectric ${n === 1 ? 'body is' : 'bodies are'} smaller than a cell (~${cellMm.toFixed(3)} mm). ` +
+        (subcell.voxelized.length ? `${subcell.voxelized.length} ${subcell.voxelized.length === 1 ? 'is' : 'are'} voxelized at cell centres: each fills only the cells whose centre it contains (often none), and none refines the grid. ` : '') +
+        (subcell.dropped.length ? `${subcell.dropped.length} with open or defective surfaces ${subcell.dropped.length === 1 ? 'is' : 'are'} left out.` : ''),
+      fix: 'Fine for small parts far from the radiator. Exclude them to silence this, or refine the mesh if they matter.',
+      bodyIds: [...subcell.voxelized, ...subcell.dropped],
+    });
   }
 
   // Loss-tangent validity over the band, once per used material.
@@ -155,7 +184,8 @@ export function computeDiagnostics(s: ProjectSnapshot): DiagnosticsResult {
   }
 
   // Pairwise: bounding-box overlaps and small gaps.
-  const bodies = model.bodies.filter((b) => active(b.id));
+  const leftOut = (id: string) => { const c = classes[id]; return c?.type === 'subcell' && !c.voxelized; };
+  const bodies = model.bodies.filter((b) => active(b.id) && !leftOut(b.id));
   let gapPairs = 0;
   for (let i = 0; i < bodies.length; i++) {
     for (let j = i + 1; j < bodies.length; j++) {

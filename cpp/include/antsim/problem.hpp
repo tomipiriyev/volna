@@ -39,13 +39,15 @@ struct MaterialSpec {
 //            dielectric cells by centre)
 //  Sheet     zero-thickness conductor on the grid plane `axis` = `coord`, with the
 //            footprint given by triangles projected onto that plane
+//  Wire      thin round wire of `radius` along the polyline `positions` (any direction,
+//            not tied to the grid; docs/physics.md, "Thin wires")
 // For metal loss, a wire box gives its physical `radius` (its edges carry the
 // wire's resistance per length), a mesh that is a round wire its `wireAxis` and
 // `radius` (as cylinders, it is calibrated to the round wire's resistance), and a
 // sheet its `thickness` (0: thick compared with the skin depth) and `sheetFaces`,
 // the faces its current flows on.
 struct ObjectSpec {
-    enum class Kind { Box, Cylinder, Mesh, Sheet } kind = Kind::Box;
+    enum class Kind { Box, Cylinder, Mesh, Sheet, Wire } kind = Kind::Box;
     std::string material = "pec";
     std::string name;
     int priority = 0;

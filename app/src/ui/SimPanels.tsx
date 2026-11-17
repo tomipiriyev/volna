@@ -90,6 +90,7 @@ export function MeshPanel() {
           <NumberField label="Padding (λ at f min)" value={m.paddingWavelengths} min={0.1} max={1} step={0.05} onChange={(paddingWavelengths) => sim.setMeshSettings({ paddingWavelengths })} />
           <NumberField label="PML cells" value={m.pmlCells} min={4} max={20} step={1} onChange={(pmlCells) => sim.setMeshSettings({ pmlCells })} />
           <NumberField label="Cell limit (millions)" value={m.maxCells / 1e6} min={0.1} max={100} step={0.5} onChange={(v) => sim.setMeshSettings({ maxCells: Math.round(v * 1e6) })} />
+          <NumberField label="Cells near thin wires (wire radii)" value={m.wireCellRadii} min={2} max={32} step={1} onChange={(wireCellRadii) => sim.setMeshSettings({ wireCellRadii })} />
         </div>
         <label className="check" title="Curved or oblique conductors use their true open lengths and areas in the cells they cut, instead of staircases. Takes about 24 % more time steps.">
           <input type="checkbox" checked={m.conformal} onChange={(e) => sim.setMeshSettings({ conformal: e.target.checked })} data-testid="mesh-conformal" />
@@ -247,6 +248,15 @@ export function ValidatePanel({ caps }: { caps: Capabilities | null }) {
                   </td>
                 </tr>
               )}
+              {v.info.report.wires && (
+                <tr>
+                  <td>Thin wires</td>
+                  <td data-testid="wires-report">
+                    {v.info.report.wires.segments.toLocaleString()} segments
+                    {v.info.report.wires.clamped > 0 ? `, ${v.info.report.wires.clamped.toLocaleString()} thicker than the grid's own line (see warning)` : ''} · CPU only
+                  </td>
+                </tr>
+              )}
               <tr>
                 <td>Signal–reference DC path</td>
                 <td>{v.info.report.dcConnected === null ? '—' : v.info.report.dcConnected ? 'connected (see warning)' : 'none'}</td>
@@ -329,6 +339,11 @@ export function SimulatePanel({ caps }: { caps: Capabilities | null }) {
           <p className="small muted">
             The GPU runs the same update equations in single precision and matches the CPU solver to about 1e-6 (Solver tab → GPU self-test). Setup and
             post-processing stay on the CPU.
+          </p>
+        )}
+        {sim.backend === 'webgpu' && hasThinWires(sim.validation?.plan.problem) && (
+          <p className="small warn" data-testid="sim-wires-cpu">
+            This project has thin wires, which the WebGPU backend does not implement: run it on the CPU.
           </p>
         )}
         <div className="row">
@@ -441,4 +456,10 @@ function LatestRun({ result, current }: { result: SimResult; current: boolean })
       </button>
     </section>
   );
+}
+
+/** Whether a problem has thin-wire objects (CPU only). */
+function hasThinWires(problem: Record<string, unknown> | undefined): boolean {
+  const objects = problem?.objects;
+  return Array.isArray(objects) && objects.some((o) => (o as { type?: string }).type === 'wire');
 }

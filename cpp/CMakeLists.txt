@@ -36,6 +36,7 @@ add_library(antsim_core STATIC
   src/nf2ff/nf2ff.cpp
   src/api/problem.cpp
   src/api/solver.cpp
+  src/api/wires.cpp
   src/api/benchmark.cpp
 )
 target_include_directories(antsim_core PUBLIC include)
@@ -109,6 +110,7 @@ if(NOT EMSCRIPTEN)
       tests/test_voxelize.cpp
       tests/test_metal.cpp
       tests/test_conformal.cpp
+      tests/test_wires.cpp
     )
     target_include_directories(antsim_tests PRIVATE ${CMAKE_BINARY_DIR}/_deps/doctest)
     target_include_directories(antsim_tests SYSTEM PRIVATE ${ANTSIM_DEPS}/nlohmann)

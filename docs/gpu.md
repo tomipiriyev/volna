@@ -130,6 +130,9 @@ present and checks Hz properly.
   which destroys the device after N steps.
 - **PMC faces** (used only by the TEM benchmark) are not implemented on the
   GPU; such problems are refused with `GPU_UNSUPPORTED`.
+- **Thin wires** (bent or oblique round wires, `"type": "wire"` objects) are not
+  implemented on the GPU either; such problems are refused with `GPU_UNSUPPORTED`,
+  and the Simulate panel says so before the run.
 - **CPU memory.** The CPU still allocates its field arrays during
   `prepare()` and frees them right after the upload. Peak wasm memory is
   therefore the same as for a CPU run.

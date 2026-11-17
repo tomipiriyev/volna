@@ -8,7 +8,11 @@ import { readProjectZip, writeProjectZip, migrateProject } from '../src/model/pr
 import { bodyRef, rematchRefs, remapAssignments } from '../src/model/refs';
 import { metalBandValidity, metalPreset, METALS, skinDepth, surfaceResistance } from '../src/model/metals';
 import { DEFAULT_FREQ, useProject } from '../src/model/store';
-import type { Assignment, CadModel, PortDef, UnitState } from '../src/model/types';
+import type { Assignment, CadModel, PortDef, UnitState, Vec3 } from '../src/model/types';
+import { wirePath } from '../src/model/wirePath';
+import { DEFAULT_MESH_SETTINGS, generateMesh, type MeshBody } from '../src/sim/mesher';
+import { buildSimulation } from '../src/sim/problemBuilder';
+import { tubeBody } from './helpers/tube';
 import { analyzeBody } from '../src/cad/meshAnalysis';
 import type { CadBody } from '../src/model/types';
 import { bodyByName, fixtureBytes, loadFixture } from './helpers/fixtures';
@@ -301,5 +305,84 @@ describe('project file', () => {
     expect(() => readProjectZip(new Uint8Array([1, 2, 3]))).toThrow(/Not a project/);
     expect(() => migrateProject({ format: 'antsim-project', formatVersion: 99 })).toThrow(/newer/);
     expect(() => migrateProject({ hello: 1 })).toThrow(/format marker/);
+  });
+});
+
+describe('thin wires along bent paths', () => {
+  // A small coil antenna: a 6 mm vertical lead, a 1.2 mm-radius bend (3 wire radii), then 1.2 turns of
+  // a helix of radius 10 mm and pitch 8 mm; wire radius 0.4 mm. Parametrised by arc length.
+  const lead = 6, bend = 1.2, R = 10, pitch = 8, turns = 1.2;
+  const arc = (Math.PI / 2) * bend, turn = Math.hypot(2 * Math.PI * R, pitch);
+  const pathLength = lead + arc + turns * turn;
+  const helix = (t: number): Vec3 => {
+    const s = t * pathLength;
+    if (s <= lead) return [R, 0, s];
+    if (s <= lead + arc) {
+      const a = (s - lead) / bend;
+      return [R, bend - bend * Math.cos(a), lead + bend * Math.sin(a)];
+    }
+    const phi = ((s - lead - arc) / turn) * 2 * Math.PI;
+    return [R * Math.cos(phi), bend + R * Math.sin(phi), lead + bend + (pitch * phi) / (2 * Math.PI)];
+  };
+
+  it('recovers the centreline and radius of a swept round wire from its tessellation', () => {
+    const w = wirePath(tubeBody('coil', helix, 0.4, 400, 16));
+    expect(w).not.toBeNull();
+    expect(w!.radius).toBeCloseTo(0.4, 2);
+    expect(Math.abs(w!.length / pathLength - 1)).toBeLessThan(0.01);
+    expect(w!.points[0]).toEqual(expect.arrayContaining([expect.closeTo(10, 3), expect.closeTo(0, 3), expect.closeTo(0, 3)]));
+    // Every centreline point lies on the true path (the helix and its lead).
+    const ref = Array.from({ length: 4001 }, (_, i) => helix(i / 4000));
+    for (const p of w!.points) expect(Math.min(...ref.map((q) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2])))).toBeLessThan(0.05);
+  });
+
+  it('classifies it as a thin wire when thinner than a cell, a solid when thicker; small dielectrics are sub-cell', () => {
+    const coil = tubeBody('coil', helix, 0.4, 400, 16);
+    expect(classifyBody(coil, 1, 3, 'radiator')).toMatchObject({ type: 'curvedWire' });
+    expect(classifyBody(coil, 1, 0.3, 'radiator')).toMatchObject({ type: 'solid' });
+    expect(classifyBody(coil, 1, 3, 'dielectric')).toMatchObject({ type: 'subcell', voxelized: true });
+    // A straight cylinder is not a bent wire, and a plain box is not a wire at all.
+    const box = quadBody('q', [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]]);
+    expect(classifyBody(box, 1, 3, 'dielectric')).toMatchObject({ type: 'subcell', voxelized: false });
+  });
+
+  it('turns sub-cell dielectrics into a warning and keeps the feed on the wire end', () => {
+    const coil = tubeBody('coil', helix, 0.4, 400, 16);
+    const gnd = quadBody('gnd', [[-30, -30, -1], [30, -30, -1], [30, 30, -1], [-30, 30, -1]]);
+    const chip = tubeBody('chip', (t) => [-5 + t, 0, 0.5], 0.3, 4, 8);
+    const model = { ...({} as CadModel), fileName: 'coil', units: confirmedMm.declared, bodies: [coil, gnd, chip], root: { name: '', children: [], bodyIds: [] }, bbox: { min: [-30, -30, -1], max: [30, 30, 16] } } as CadModel;
+    const port = makePort(coil, gnd, { lateral: [R, 0], anchor: -0.5 });
+    const s = snapshot(model, { coil: conductor('radiator'), gnd: conductor('ground'), chip: { role: 'dielectric', materialId: 'fr4', priority: 0 } }, port);
+    const d = computeDiagnostics(s);
+    expect(d.classes.coil.type).toBe('curvedWire');
+    expect(d.diagnostics.filter((x) => x.severity === 'error')).toEqual([]);
+    expect(d.diagnostics.find((x) => x.code === 'SUBCELL_DIELECTRIC')?.severity).toBe('warning');
+    expect(d.diagnostics.find((x) => x.code === 'THIN_WIRE_PATH')).toBeDefined();
+    // The problem: a wire object starting exactly at the feed's signal end, which lies on grid
+    // lines, and no lateral feed refinement (cells stay several wire radii wide).
+    const plan = buildSimulation(s, new Map(model.bodies.map((b) => [b.id, { positions: b.positions, indices: b.indices }])));
+    const wire = (plan.problem.objects as { type: string; points: number[]; radius: number }[]).find((o) => o.type === 'wire')!;
+    const p = plan.problem.port as { start: Vec3; stop: Vec3 };
+    expect(wire.points.slice(0, 3)).toEqual(p.stop);
+    expect(wire.radius).toBeCloseTo(0.4, 2);
+    for (const a of [0, 1, 2]) expect(plan.mesh.lines[a]).toContain(p.stop[a]);
+    expect(Math.min(plan.mesh.minCell[0], plan.mesh.minCell[1])).toBeGreaterThan(8 * 0.4 * 0.5);
+  });
+});
+
+describe('mesher line merging', () => {
+  it('merges lines a sliver apart but keeps the feed lines exactly', () => {
+    const box = (id: string, min: Vec3, max: Vec3): MeshBody => ({ id, name: id, bbox: { min, max }, conductor: true, epsR: 1, cls: { type: 'solid', thicknessCells: 3, marginal: false } });
+    const res = generateMesh({
+      bodies: [box('a', [-10, -10, -1], [10, 10, 0]), box('b', [-10.003, -10, 1], [9.9995, 10, 2])],
+      feed: { axis: 2, start: [10.001, 0, 0], end: [10.001, 0, 1] },
+      fMin: 1e9,
+      fMax: 2e9,
+      settings: DEFAULT_MESH_SETTINGS,
+    });
+    const x = res.lines[0];
+    expect(x).toContain(10.001); // the feed line survives
+    expect(x.filter((v) => Math.abs(v + 10) < 0.01)).toHaveLength(1); // -10 and -10.003 merged
+    expect(Math.min(...x.slice(1).map((v, i) => v - x[i]))).toBeGreaterThan(0.01);
   });
 });

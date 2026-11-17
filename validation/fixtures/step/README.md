@@ -23,6 +23,7 @@ Dimensions below are in mm.
 | `open_shell.step` | A box with its top face removed | Open-surface diagnostic |
 | `overlap_dielectrics.step` | Two overlapping blocks | Overlap / priority diagnostic |
 | `thin_features.step` | A 35 µm plate tilted 30° about x, and an r = 0.1 wire along x | Unsupported oblique thin feature; thin-wire classification |
+| `dipole_tilted.step` | `dipole.step` with each arm tilted 30° about y around the centre of its cap at the gap (written by `make_tilted_dipole.mjs`, no FreeCAD needed); the caps stay centred on the z axis, 1 mm apart | Round wires on an oblique path become thin wires; feed at the wire ends |
 
 Generation notes:
 - FreeCAD wraps multiple top-level objects in an assembly named after the

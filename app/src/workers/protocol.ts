@@ -32,6 +32,8 @@ export interface MeshReport {
   dcConnected: boolean | null;
   /** Conformal mode only: faces cut by conductors, those capped for stability, the update's largest eigenvalue. */
   conformal?: { cutFaces: number; cappedFaces: number; eigenvalue: number };
+  /** Thin-wire chains (CPU only): segments, how many have their in-cell term held at the minimum. */
+  wires?: { segments: number; clamped: number; minLogR0OverA: number; eigenvalue: number };
   diagnostics: SolverDiagnostic[];
 }
 

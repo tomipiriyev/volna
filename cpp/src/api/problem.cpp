@@ -201,8 +201,14 @@ Problem parseProblem(const std::string& text) {
                     if (!(os.thickness >= 0)) fail("objects.sheet.thickness", "must be zero or positive");
                     if (os.sheetFaces != 1 && os.sheetFaces != 2) fail("objects.sheet.currentFaces", "must be 1 or 2");
                 }
+            } else if (type == "wire") {
+                os.kind = ObjectSpec::Kind::Wire;
+                os.positions = numberArray<float>(o.at("points"), "objects.wire.points");
+                os.radius = o.at("radius").get<double>();
+                if (os.positions.size() % 3 || os.positions.size() < 6) fail("objects.wire.points", "needs two or more points (x, y, z each)");
+                if (!(os.radius > 0)) fail("objects.wire.radius", "must be positive");
             } else {
-                fail("objects.type", "unknown '" + type + "' (box, cylinder, mesh, sheet)");
+                fail("objects.type", "unknown '" + type + "' (box, cylinder, mesh, sheet, wire)");
             }
             if (os.material != "pec") {
                 const MaterialSpec* mat = nullptr;
@@ -210,6 +216,7 @@ Problem parseProblem(const std::string& text) {
                     if (m.name == os.material) mat = &m;
                 if (!mat) fail("objects.material", "unknown material '" + os.material + "'");
                 if (os.kind == ObjectSpec::Kind::Sheet && !mat->metal) fail("objects.sheet.material", "sheets must be conductors (pec or a metal)");
+                if (os.kind == ObjectSpec::Kind::Wire && !mat->metal) fail("objects.wire.material", "wires must be conductors (pec or a metal)");
                 if (mat->metal && os.kind == ObjectSpec::Kind::Box) {
                     int zero = 0;
                     for (int a = 0; a < 3; ++a) zero += os.max[a] == os.min[a];

@@ -5,6 +5,7 @@
 // 2. Local refinement: thin dielectric layers get >= minSlabCells across;
 //    small solid conductors >= 2 cells per dimension; the feed gap
 //    >= feedGapCells along the feed axis and the same cell size laterally.
+//    Thin wires on bent or oblique paths get cells of a few wire radii.
 // 3. Fixed lines: solid faces, sheet planes (snapped), sheet outlines, wire
 //    axes and ends, feed ends and the feed line, domain ends.
 // 4. Each gap between fixed lines is split uniformly at its smallest allowed
@@ -27,6 +28,12 @@ export interface MeshSettings {
   maxCells: number;
   /** Curved or oblique conductors use conformal faces instead of staircases (docs/physics.md). */
   conformal: boolean;
+  /**
+   * Cell size around thin wires on bent or oblique paths, in wire radii (capped at the
+   * background cell). The thin-wire model needs cells several radii wide: its in-cell
+   * correction ln(r0 / a) must stay positive, r0 being 0.2-0.7 cell (docs/physics.md).
+   */
+  wireCellRadii: number;
 }
 
 export const DEFAULT_MESH_SETTINGS: MeshSettings = {
@@ -39,6 +46,7 @@ export const DEFAULT_MESH_SETTINGS: MeshSettings = {
   feedGapCells: 2,
   maxCells: 8_000_000,
   conformal: true,
+  wireCellRadii: 8,
 };
 
 export interface MeshBody {
@@ -54,6 +62,8 @@ export interface MeshFeed {
   axis: Axis;
   start: Vec3; // reference side, true mm
   end: Vec3; // signal side
+  /** A terminal is a thin wire: no lateral refinement, which would make the cells thinner than the wire. */
+  wire?: boolean;
 }
 
 export interface MeshInput {
@@ -94,6 +104,8 @@ interface Region {
   lo: number;
   hi: number;
   h: number;
+  /** No grid line at its ends (it only caps the cell size). */
+  soft?: boolean;
 }
 
 const otherAxes = (a: Axis): [Axis, Axis] => (a === 0 ? [1, 2] : a === 1 ? [0, 2] : [0, 1]);
@@ -200,7 +212,7 @@ export function generateMesh(input: MeshInput): MeshResult {
     regions[a].push({ lo: Math.min(feed.start[a], feed.end[a]), hi: Math.max(feed.start[a], feed.end[a]), h: hFeed });
     for (const o of otherAxes(a)) {
       fixed[o].push(feed.start[o]);
-      regions[o].push({ lo: feed.start[o] - 2 * hFeed, hi: feed.start[o] + 2 * hFeed, h: hFeed });
+      if (!feed.wire) regions[o].push({ lo: feed.start[o] - 2 * hFeed, hi: feed.start[o] + 2 * hFeed, h: hFeed });
     }
   }
   // The existing fixed line within tol of x, if any (snap to it, not to the float32 CAD value).
@@ -234,6 +246,12 @@ export function generateMesh(input: MeshInput): MeshResult {
     fixed[a].push(coord);
     for (const o of otherAxes(a)) fixed[o].push(b.bbox.min[o], b.bbox.max[o]);
   }
+  // Thin wires on bent or oblique paths: cells of a few wire radii around them (no fixed lines).
+  for (const b of bodies) {
+    if (b.cls.type !== 'curvedWire') continue;
+    const h = Math.min(h0, s.wireCellRadii * b.cls.radius);
+    if (h < h0) for (const a of [0, 1, 2] as Axis[]) regions[a].push({ lo: b.bbox.min[a], hi: b.bbox.max[a], h, soft: true });
+  }
   // Wires: a line of edges on the wire axis.
   for (const b of bodies) {
     if (b.cls.type !== 'wire') continue;
@@ -256,17 +274,29 @@ export function generateMesh(input: MeshInput): MeshResult {
   for (const a of [0, 1, 2] as Axis[]) {
     // Merge fixed lines closer than a small fraction of the finest cell they bound.
     const span = domain.max[a] - domain.min[a];
-    const regionEdges = regions[a].flatMap((r) => [r.lo, r.hi]).filter((x) => x > domain.min[a] && x < domain.max[a]);
+    const regionEdges = regions[a].filter((r) => !r.soft).flatMap((r) => [r.lo, r.hi]).filter((x) => x > domain.min[a] && x < domain.max[a]);
     const sorted = [...fixed[a], ...regionEdges, domain.min[a], domain.max[a]].sort((x, y) => x - y);
-    const merged: number[] = [];
-    // Tessellated coordinates carry float32 noise (~1e-7 relative): merge lines closer than 0.1 um.
-    const mergeTol = Math.max(1e-4, 1e-7 * span);
-    for (const x of sorted) if (!merged.length || x - merged[merged.length - 1] > mergeTol) merged.push(x);
     const hmax = (lo: number, hi: number) => {
       let h = h0;
       for (const r of regions[a]) if (r.hi > lo + 1e-12 && r.lo < hi - 1e-12) h = Math.min(h, r.h);
       return h;
     };
+    // Merge lines closer than 5 % of the local cell: tessellation noise (~1e-7 relative), and
+    // faces that nearly coincide in CAD (e.g. a board and its ground plane outlines a few um
+    // apart), which would otherwise make tiny cells and shrink the time step; the grid cannot
+    // resolve such a sliver anyway. The feed's lines win, since the port must lie exactly on them.
+    const keep = new Set(feed ? [feed.start[a], feed.end[a]] : []);
+    const floatTol = Math.max(1e-4, 1e-7 * span);
+    const merged: number[] = [];
+    for (const x of sorted) {
+      const last = merged[merged.length - 1];
+      if (merged.length && x - last <= Math.max(floatTol, 0.05 * hmax(last, x))) {
+        if (keep.has(x) && !keep.has(last)) merged[merged.length - 1] = x;
+        else if (keep.has(x) && keep.has(last) && x !== last) merged.push(x);
+        continue;
+      }
+      merged.push(x);
+    }
     const inner = fillLines(merged, hmax, clampRatio(s.maxRatio));
     const first = inner[1] - inner[0], last = inner[inner.length - 1] - inner[inner.length - 2];
     const pmlLo = Array.from({ length: s.pmlCells }, (_, i) => inner[0] - first * (s.pmlCells - i));

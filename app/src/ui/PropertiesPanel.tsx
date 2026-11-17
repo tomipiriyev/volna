@@ -21,6 +21,10 @@ function describeClass(c: GeomClass | undefined) {
       return `Thin wire along ${'xyz'[c.axis]}, Ø ${c.diameter.toFixed(3)} mm`;
     case 'slab':
       return `Thin layer ⟂${'xyz'[c.axis]} (${c.thickness.toFixed(3)} mm), refined by the mesher`;
+    case 'curvedWire':
+      return `Thin wire along a bent path, Ø ${(2 * c.radius).toFixed(3)} mm, ${c.length.toFixed(1)} mm long (CPU only)`;
+    case 'subcell':
+      return c.voxelized ? 'Smaller than a cell: voxelized at cell centres' : 'Smaller than a cell, surface not closed: left out';
     case 'unsupported':
       return `Unsupported: ${c.reason}`;
   }
@@ -85,6 +89,7 @@ function ConductorFields({ bodyId, a, cls }: { bodyId: string; a: Assignment; cl
           Surface resistance {(1e3 * surfaceResistance(c.sigma, fFit)).toPrecision(3)} mΩ, skin depth {(1e6 * skinDepth(c.sigma, fFit)).toPrecision(3)} µm at{' '}
           {(fFit / 1e9).toFixed(3)} GHz (band centre). The loss is applied on the conductor's surface
           {cls?.type === 'wire' && `, using the wire's ${cls.round ? 'diameter' : 'perimeter-equivalent diameter'} of ${(2 * cls.lossRadius).toFixed(3)} mm`}
+          {cls?.type === 'curvedWire' && `, using the wire's diameter of ${(2 * cls.radius).toFixed(3)} mm`}
           {cls?.type === 'solid' && cls.roundWire && `, as a round wire of ${(2 * cls.roundWire.radius).toFixed(3)} mm diameter`}.
           {cls?.type === 'sheet' && ' The sheet is modelled with zero thickness, so the solver cannot tell which face carries the current: choose it above (one face gives twice the loss of both).'}
         </p>
