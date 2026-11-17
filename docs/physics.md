@@ -207,6 +207,18 @@ the same way, graded cells.
 In the tilted dipoles the feed gap stays along z, so the arms kink slightly at the
 feed. That kink accounts for part of the change in R.
 
+**Grid convergence is slow.** The checks above each use one grid. Refining the cells
+around a wire moves its resonance down, roughly first-order. On a vertical
+monopole (a = 0.2 mm, about 0.31λ long, on a small board with a lumped feed),
+capping the cells near it at 3.2, 1.6 and 0.8 mm gave f_res 867.2, 850.2 and
+840.5 MHz: −2.0%, then −1.1%. The limit extrapolates to roughly 4% below the
+3.2 mm value. A horizontal-coil antenna of the same length moved −0.8% for one
+halving. The likely causes are the r0 calibration, which assumes locally uniform
+transverse cells, and the end and feed regions. Until this is improved, check
+convergence (lower "Cells near thin wires" on the Mesh step, `wireCellRadii`), and
+expect absolute resonances to be a few per cent high on coarse grids. Comparisons
+between designs on the same grid are much tighter.
+
 ## Conductor loss (metals)
 
 A conductor is PEC or a **metal** with conductivity σ. Metal objects are

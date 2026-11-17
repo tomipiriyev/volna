@@ -59,7 +59,11 @@ approximately. Each milestone updates it.
   and match the volume to 10%, or the body stays unsupported. Measured errors: a
   dipole's resonance moves by up to 0.12% with its angle to the grid, and its
   resistance by up to 2.7%. A small loop's inductance is 2.1% above the thin-ring
-  formula. No comparison against NEC or openEMS has been made yet. The model
+  formula. Refining the grid lowers the resonance, roughly first-order: −2.0%
+  and then −1.1% per halving of the cells near a vertical monopole, and about 4% in
+  the extrapolated limit. Treat absolute resonances on coarse grids as a few per
+  cent high, and check convergence. No comparison against NEC or openEMS has been
+  made yet. The model
   assumes the wire is thinner than the grid's own line radius, 0.2–0.7 cell. Where
   it is not, typically next to a feed on a grid line in fine cells, the in-cell
   term is held at a minimum (`WIRE_THICK`), and those segments act thinner than
@@ -95,7 +99,9 @@ approximately. Each milestone updates it.
   slabs (3 cells), the feed (2 cells across the gap, ±2 cells laterally)
   and conductor solids (2 cells). Region edges also become fixed lines.
   Around thin wires on bent or oblique paths, cells are capped at 8 wire radii
-  (`wireCellRadii`), and those region edges are not fixed lines. A feed on a thin
+  ("Cells near thin wires" on the Mesh step), and those region edges are not fixed
+  lines. Fewer radii refine there, but below about 5 the wire becomes thicker than
+  the grid's own line and is clamped (`WIRE_THICK`). A feed on a thin
   wire gets no lateral refinement.
 - Fixed lines closer than 5% of the local cell are merged (nearly coincident CAD
   faces, such as a board outline and its ground plane a few µm apart); the feed's

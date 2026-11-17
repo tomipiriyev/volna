@@ -12,8 +12,8 @@
 - **Round wires bent or tilted off the axes in STEP files** (coils, helices,
   tilted whips) are recognised. Their centreline and radius are recovered from the
   tessellation, so they become thin wires instead of `THIN_FEATURE_UNSUPPORTED`.
-  The mesher caps cells near them at 8 wire radii. A feed on the wire snaps to its
-  end.
+  The mesher caps cells near them at 8 wire radii ("Cells near thin wires" on the
+  Mesh step). A feed on the wire snaps to its end.
 - **Sub-cell dielectric bodies** (SMD parts and similar) are voxelized at cell
   centres, or left out if their surface is defective, with one
   `SUBCELL_DIELECTRIC` warning. Before, they were blocking errors.
@@ -28,6 +28,9 @@
 
 ### Known limitations
 - The thin-wire model has not been checked against NEC or openEMS yet.
+- Grid convergence of thin wires is slow, roughly first-order. A vertical monopole's
+  resonance fell 2.0% and then 1.1% over two halvings of the nearby cells, and about 4%
+  in the extrapolated limit. Absolute resonances on coarse grids run a few per cent high.
 - Near a feed in fine cells, the wire can be thicker than the grid's own line
   radius; its in-cell term is then held at a minimum (`WIRE_THICK`), and that part
   acts slightly thinner than it is.
